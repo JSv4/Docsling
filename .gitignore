@@ -142,4 +142,7 @@ cython_debug/
 
 # OS generated files
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# Docling Models (if not checked in)
+# docling_models/ 

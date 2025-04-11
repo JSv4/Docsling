@@ -1,3 +1,16 @@
 fastapi>=0.100.0,<0.112.0
 uvicorn[standard]>=0.20.0,<0.30.0
-pydantic>=2.0.0,<3.0.0 
+pydantic>=2.0.0,<3.0.0
+python-multipart
+# Docling and its core dependencies
+docling
+docling-core
+# Other dependencies from the original parser
+numpy
+pdf2image
+python-pytesseract
+pdfplumber
+shapely # Includes STRtree
+# Potentially needed for file handling if remote storage was used via default_storage
+# requests
+# boto3 # or other relevant storage library 

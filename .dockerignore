@@ -51,4 +51,6 @@ README.md
 # Build artifacts (if any)
 dist/
 build/
-*.egg-info 
+*.egg-info
+
+# Add other files/directories you don't want in the image 
