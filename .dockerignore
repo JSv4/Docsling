@@ -1,0 +1,54 @@
+# Git specific files
+.git/
+.gitignore
+
+# Docker specific files
+.dockerignore
+Dockerfile*
+
+# Python virtual environment
+.venv/
+venv/
+env/
+ENV/
+__pypackages__/
+
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*.so
+
+# IDE / Editor specific files
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS specific files
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+.pytest_cache/
+.coverage*
+htmlcov/
+
+# Logs
+*.log
+
+# Secrets / Local config (should be mounted or injected, not built-in)
+.env*
+local_settings.py
+
+# Documentation (if not needed in image)
+docs/
+site/
+
+# README / Other markdown (usually not needed in image)
+README.md
+*.md
+
+# Build artifacts (if any)
+dist/
+build/
+*.egg-info 

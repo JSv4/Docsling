@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./app:/code/app # Mount local code for hot-reloading
+    ports:
+      - "8000:8000" # Map host port 8000 to container port 8000
+    environment:
+      # Add any environment variables needed by your app here
+      # EXAMPLE_VAR: example_value
+    env_file:
+      - .env # Optional: Load environment variables from a .env file 
