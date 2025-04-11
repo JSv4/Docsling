@@ -34,17 +34,20 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+# --- Download Models using Python Script ---
+# Copy the download script into the image
+COPY ./scripts/download_models.py /app/scripts/download_models.py
+
+# Run the script to download models to the path defined by DOCLING_MODELS_PATH
+# Use --force if you always want to try downloading during build
+RUN python /app/scripts/download_models.py --path "${DOCLING_MODELS_PATH}" # Add --force if needed
+# Optional: Verify download, e.g., check for expected files/dirs
+# RUN ls -l "${DOCLING_MODELS_PATH}"
+# --- End Model Download ---
+
 # Copy the application code into the container
 # Ensure .dockerignore excludes unnecessary files/folders (like .git, venv, etc.)
 COPY ./app /app/app
-
-# Copy Docling models into the image.
-# WARNING: This can significantly increase image size.
-# For production, consider mounting models as a volume instead.
-# Ensure the 'docling_models' directory exists in your build context (where you run 'docker build')
-COPY ./docling_models ${DOCLING_MODELS_PATH}
-# Optional: Verify models copied correctly (adjust path/check as needed)
-# RUN ls -l ${DOCLING_MODELS_PATH}
 
 # Expose the port the app runs on (default for Uvicorn is 8000)
 EXPOSE 8000

@@ -3,7 +3,7 @@ import base64
 import io
 import os
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 # --- Configuration ---
 # Adjust resource requirements as needed. PDF processing can be intensive.
@@ -14,8 +14,16 @@ MEMORY_SIZE = "8Gi"
 PYTHON_VERSION = "python3.10" # Match your project's Python version
 
 # --- Logging Setup ---
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)-8s %(name)s %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
+
+# --- Define Model Path ---
+# Define the target path inside the container (matches ENV var in Dockerfile)
+MODELS_TARGET_PATH = "/app/docling_models"
 
 # --- Define Beam Image ---
 # Replicate dependencies from requirements.txt and Dockerfile system installs
@@ -25,7 +33,6 @@ image = beam.Image(
         "fastapi", # Keep if models depend on it, otherwise optional
         "uvicorn[standard]", # Optional for beam app
         "pydantic>=2.0.0,<3.0.0", # Ensure version compatibility
-        "python-multipart", # Likely not needed for base64 input
         # Docling dependencies
         "docling",
         "docling-core",
@@ -35,6 +42,7 @@ image = beam.Image(
         "python-pytesseract",
         "pdfplumber",
         "shapely",
+        "easyocr", # Ensure easyocr is listed
         # Add any other specific versions if needed
     ],
     apt_packages=[
@@ -44,9 +52,63 @@ image = beam.Image(
     ],
     commands=[
         "pip install --upgrade pip",
-        # Add any other setup commands if required
+        # --- Download Models using Python Script ---
+        # Note: Beam copies the deployment dir to /app, so scripts/download_models.py becomes /app/scripts/download_models.py
+        f"python /app/scripts/download_models.py --path {MODELS_TARGET_PATH}", # Add --force if needed
+        # Optional verification
+        # f"ls -l {MODELS_TARGET_PATH}",
+        # --- End Model Download ---
     ],
 )
+
+# --- Loader Function ---
+def load_parser_components() -> Optional[Any]: # Return type depends on what you load
+    """
+    Loads and initializes the Docling DocumentConverter once when the container starts.
+    """
+    logger.info("Executing on_start loader: Initializing DocumentConverter...")
+    try:
+        # Import necessary components here, within the loader's execution context
+        from docling_core.converter.document_converter import DocumentConverter
+        from docling_core.converter.option import InputFormat, PdfFormatOption
+        from docling_core.pipeline.pdf.pdf_pipeline_options import PdfPipelineOptions
+        from docling_core.pipeline.ocr.easyocr.easyocr_options import EasyOcrOptions
+
+        # Ensure the model path exists (should have been created by download script)
+        if not os.path.isdir(MODELS_TARGET_PATH):
+             logger.error(f"Model directory not found at expected path: {MODELS_TARGET_PATH}")
+             # Raise an error to potentially prevent the endpoint from starting incorrectly
+             raise FileNotFoundError(f"Model directory not found: {MODELS_TARGET_PATH}")
+
+        # Configure OCR options (if needed, mirror from parser.py or simplify)
+        # Ensure languages here match those downloaded by scripts/download_models.py
+        ocr_options = EasyOcrOptions(
+            model_storage_directory=MODELS_TARGET_PATH,
+            lang_list=['en'] # Ensure this matches languages downloaded
+        )
+
+        # Configure pipeline options
+        pipeline_options = PdfPipelineOptions(
+            artifacts_path=MODELS_TARGET_PATH,
+            do_ocr=True, # Default OCR behavior, can be overridden per-request if needed
+            do_table_structure=True,
+            generate_page_images=True, # Needed for OCR
+            ocr_options=ocr_options,
+        )
+
+        # Initialize the converter
+        doc_converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            }
+        )
+        logger.info("DocumentConverter initialized successfully.")
+        # Return the initialized converter (or other necessary components)
+        return doc_converter
+    except Exception as e:
+        logger.exception("Failed to initialize DocumentConverter during on_start.")
+        # Return None or raise error depending on desired behavior if loading fails
+        return None # Or raise e
 
 # --- Beam Endpoint Definition ---
 @beam.endpoint(
@@ -55,13 +117,14 @@ image = beam.Image(
     memory=MEMORY_SIZE,
     # gpu=GPU, # Uncomment if GPU is needed
     image=image,
-    keep_warm_seconds=60, # Optional: reduce cold starts
-    # Volumes can be mounted here if models are stored externally
-    # volumes=[beam.Volume(name="docling_models_vol", mount_path="/mnt/models")]
+    keep_warm_seconds=60, # Keep warm for 60 seconds
+    on_start=load_parser_components, # Add the loader function here
+    # volumes=[...] # Keep Volume option commented out unless needed
 )
-def parse_pdf_beam(**inputs: Dict[str, Any]) -> Dict[str, Any]:
+def parse_pdf_beam(context: beam.Context, **inputs: Dict[str, Any]) -> Dict[str, Any]: # Add context
     """
     Beam endpoint to parse a PDF document using Docling.
+    Uses a pre-loaded DocumentConverter from the on_start loader.
 
     Expects input JSON with:
     - pdf_base64 (str): Base64 encoded content of the PDF file.
@@ -74,11 +137,21 @@ def parse_pdf_beam(**inputs: Dict[str, Any]) -> Dict[str, Any]:
         A dictionary containing the parsed 'result' (OpenContractDocExport structure)
         or an 'error' message.
     """
+    # --- Retrieve pre-loaded components ---
+    # The value returned by load_parser_components is in context.on_start_value
+    doc_converter = context.on_start_value
+
+    if doc_converter is None:
+         logger.error("DocumentConverter not available from on_start loader. Cannot process request.")
+         # Return a 503 Service Unavailable or similar error
+         # Note: Beam doesn't directly support setting HTTP status codes in the return dict easily.
+         # Returning an error message is standard.
+         return {"error": "Parser service initialization failed. Please try again later."}
+
     # --- Import necessary functions inside the endpoint ---
-    # This ensures imports happen within the Beam execution environment
-    # Note: Ensure the 'app' directory is included in the deployment package
     try:
-        from app.core.parser import process_document_dynamic_init
+        # We only need the internal processing function and the output model now
+        from app.core.parser import _internal_process_document # Import the internal function
         from app.models.types import OpenContractDocExport
     except ImportError as e:
          logger.exception("Failed to import application modules within Beam endpoint.")
@@ -109,19 +182,15 @@ def parse_pdf_beam(**inputs: Dict[str, Any]) -> Dict[str, Any]:
     llm_enhanced_hierarchy = inputs.get("llm_enhanced_hierarchy", False)
     logger.info(f"Processing options: force_ocr={force_ocr}, roll_up_groups={roll_up_groups}, llm_enhanced_hierarchy={llm_enhanced_hierarchy}")
 
-    # --- Define Model Path within Beam Container ---
-    # Beam copies the deployment directory to /app inside the container.
-    # If 'docling_models' is in the root of your deployment dir, this path should work.
-    models_path_in_container = "/app/docling_models"
-    logger.info(f"Expecting Docling models at: {models_path_in_container}")
-
     # --- Execute Parsing Logic ---
+    # Note: We now call the internal function directly with the pre-loaded converter
     try:
-        result_model: Optional[OpenContractDocExport] = process_document_dynamic_init(
+        logger.info(f"Processing document {filename} using pre-loaded converter.")
+        result_model: Optional[OpenContractDocExport] = _internal_process_document(
+            doc_converter=doc_converter, # Pass the pre-loaded converter
             pdf_bytes=pdf_bytes,
             pdf_filename=filename,
-            models_path=models_path_in_container, # Pass the path here
-            force_ocr=force_ocr,
+            force_ocr=force_ocr, # Pass options
             roll_up_groups=roll_up_groups,
             llm_enhanced_hierarchy=llm_enhanced_hierarchy,
         )
@@ -137,11 +206,7 @@ def parse_pdf_beam(**inputs: Dict[str, Any]) -> Dict[str, Any]:
             # Provide a more specific error if possible based on logs from process_document
             return {"error": "Failed to process document. Check service logs for details."}
 
-    except FileNotFoundError as fnf_error:
-         # Catch model path errors specifically if they bubble up
-         logger.exception(f"Model path error during processing for {filename}: {fnf_error}")
-         return {"error": f"Internal server error: Could not find models at expected path - {fnf_error}"}
     except Exception as e:
+        # Catch errors during the _internal_process_document call
         logger.exception(f"Unexpected error during PDF processing for {filename}: {e}")
-        # Avoid leaking detailed stack traces in the response unless desired
-        return {"error": f"An unexpected internal server error occurred: {type(e).__name__}"} 
+        return {"error": f"An unexpected internal server error occurred during processing: {type(e).__name__}"} 

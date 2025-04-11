@@ -144,5 +144,7 @@ cython_debug/
 .DS_Store
 Thumbs.db
 
-# Docling Models (if not checked in)
-# docling_models/ 
+# Docling Models (Downloaded during build, not checked in)
+docling_models/
+# Also ignore the downloaded archive if applicable
+docling_models.tar.gz 

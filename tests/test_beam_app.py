@@ -4,12 +4,15 @@ import json
 import os
 from pathlib import Path
 from typing import Dict, Any, Optional
+from unittest.mock import MagicMock
 
 # Import the function decorated with @beam.endpoint
+import beam
 from beam_app import parse_pdf_beam
 
 # Import fixture paths (adjust if necessary)
 from tests.fixtures import SAMPLE_PDF_FILE_ONE_PATH
+from app.models.types import OpenContractDocExport
 
 # --- Fixtures ---
 
@@ -30,6 +33,31 @@ def sample_pdf_base64_beam(sample_pdf_bytes_beam: bytes) -> str:
 def sample_pdf_filename_beam() -> str:
     """Returns the name of the sample PDF file."""
     return SAMPLE_PDF_FILE_ONE_PATH.name
+
+@pytest.fixture(scope="function")
+def mock_context() -> beam.Context:
+    """Creates a mock beam.Context object."""
+    mock_ctx = MagicMock(spec=beam.Context)
+    mock_ctx.on_start_value = None
+    return mock_ctx
+
+@pytest.fixture(scope="function")
+def mock_doc_converter() -> MagicMock:
+    """Creates a mock DocumentConverter object."""
+    return MagicMock(name="MockDocConverter")
+
+@pytest.fixture(scope="function")
+def sample_success_response() -> OpenContractDocExport:
+    """Provides a sample successful parsing result model."""
+    return OpenContractDocExport(
+        title="Sample Title",
+        content="Sample content...",
+        pageCount=1,
+        pawlsFileContent=[],
+        docLabels=[],
+        labelledText=[],
+        relationships=[]
+    )
 
 # --- Test Class for Beam Endpoint Function ---
 
@@ -67,10 +95,8 @@ def mock_models_path(monkeypatch):
          # relative to the '/app/' path during local tests.
 
 
-class TestBeamEndpointFunction:
-    """
-    Tests the parse_pdf_beam function directly, simulating Beam inputs.
-    """
+class TestBeamAppFunction:
+    """Tests for the parse_pdf_beam function."""
 
     # Reuse expected values from TestDoclingParserEndpoint if applicable
     EXPECTED_TITLE = "Exhibit 10.1"
@@ -78,13 +104,22 @@ class TestBeamEndpointFunction:
     EXPECTED_RELATIONSHIPS_COUNT_ROLLED_UP = 24
     EXPECTED_LABELLED_TEXT_COUNT = 272
 
-    def test_beam_function_success_rolled_up(
-        self, sample_pdf_base64_beam: str, sample_pdf_filename_beam: str
+    def test_beam_function_success(
+        self,
+        mocker,
+        mock_context: beam.Context,
+        mock_doc_converter: MagicMock,
+        sample_pdf_base64_beam: str,
+        sample_pdf_filename_beam: str,
+        sample_success_response: OpenContractDocExport,
     ) -> None:
-        """
-        Test the beam function directly with valid inputs and roll_up_groups=True.
-        """
-        # Simulate the input dictionary Beam would provide
+        """Test successful execution of the beam function."""
+        # --- Arrange ---
+        mock_context.on_start_value = mock_doc_converter
+        mock_process = mocker.patch(
+            "app.core.parser._internal_process_document",
+            return_value=sample_success_response
+        )
         test_inputs = {
             "pdf_base64": sample_pdf_base64_beam,
             "filename": sample_pdf_filename_beam,
@@ -92,40 +127,118 @@ class TestBeamEndpointFunction:
             "force_ocr": False,
         }
 
-        # Call the function directly
-        response_dict = parse_pdf_beam(**test_inputs)
+        # --- Act ---
+        response_dict = parse_pdf_beam(mock_context, **test_inputs)
 
-        # Assertions on the returned dictionary
-        assert "error" not in response_dict, f"Function returned error: {response_dict.get('error')}"
+        # --- Assert ---
+        mock_process.assert_called_once_with(
+            doc_converter=mock_doc_converter,
+            pdf_bytes=mocker.ANY,
+            pdf_filename=sample_pdf_filename_beam,
+            force_ocr=False,
+            roll_up_groups=True,
+            llm_enhanced_hierarchy=False,
+        )
         assert "result" in response_dict
+        assert "error" not in response_dict
         result = response_dict["result"]
-
         assert result is not None
-        assert result.get("title") == self.EXPECTED_TITLE
-        assert result.get("pageCount") == self.EXPECTED_PAGE_COUNT # Check alias used in model dump
-        assert len(result.get("labelledText", [])) == self.EXPECTED_LABELLED_TEXT_COUNT
-        assert len(result.get("relationships", [])) == self.EXPECTED_RELATIONSHIPS_COUNT_ROLLED_UP
-        # Add more specific checks on pawlsFileContent, etc. if needed
+        assert result == sample_success_response.model_dump(mode='json')
 
-    def test_beam_function_missing_input(self) -> None:
+    def test_beam_function_loader_failed(
+        self,
+        mock_context: beam.Context,
+        sample_pdf_base64_beam: str,
+        sample_pdf_filename_beam: str,
+    ) -> None:
+        """Test the case where the on_start loader failed (context value is None)."""
+        mock_context.on_start_value = None
+        test_inputs = {
+            "pdf_base64": sample_pdf_base64_beam,
+            "filename": sample_pdf_filename_beam,
+        }
+        response_dict = parse_pdf_beam(mock_context, **test_inputs)
+        assert "error" in response_dict
+        assert "result" not in response_dict
+        assert "Parser service initialization failed" in response_dict["error"]
+
+    def test_beam_function_processing_error(
+        self,
+        mocker,
+        mock_context: beam.Context,
+        mock_doc_converter: MagicMock,
+        sample_pdf_base64_beam: str,
+        sample_pdf_filename_beam: str,
+    ) -> None:
+        """Test the case where _internal_process_document raises an exception."""
+        mock_context.on_start_value = mock_doc_converter
+        mock_process = mocker.patch(
+            "app.core.parser._internal_process_document",
+            side_effect=ValueError("Something went wrong during processing")
+        )
+        test_inputs = {
+            "pdf_base64": sample_pdf_base64_beam,
+            "filename": sample_pdf_filename_beam,
+        }
+        response_dict = parse_pdf_beam(mock_context, **test_inputs)
+        mock_process.assert_called_once()
+        assert "error" in response_dict
+        assert "result" not in response_dict
+        assert "An unexpected internal server error occurred during processing" in response_dict["error"]
+        assert "ValueError" in response_dict["error"]
+
+    def test_beam_function_processing_returns_none(
+        self,
+        mocker,
+        mock_context: beam.Context,
+        mock_doc_converter: MagicMock,
+        sample_pdf_base64_beam: str,
+        sample_pdf_filename_beam: str,
+    ) -> None:
+        """Test the case where _internal_process_document returns None."""
+        mock_context.on_start_value = mock_doc_converter
+        mock_process = mocker.patch(
+            "app.core.parser._internal_process_document",
+            return_value=None
+        )
+        test_inputs = {
+            "pdf_base64": sample_pdf_base64_beam,
+            "filename": sample_pdf_filename_beam,
+        }
+        response_dict = parse_pdf_beam(mock_context, **test_inputs)
+        mock_process.assert_called_once()
+        assert "error" in response_dict
+        assert "result" not in response_dict
+        assert "Failed to process document" in response_dict["error"]
+
+    def test_beam_function_missing_input(
+        self,
+        mock_context: beam.Context,
+        mock_doc_converter: MagicMock,
+    ) -> None:
         """Test calling the function with missing required input."""
+        mock_context.on_start_value = mock_doc_converter
         test_inputs = {
             "filename": "test.pdf"
-            # Missing pdf_base64
         }
-        response_dict = parse_pdf_beam(**test_inputs)
+        response_dict = parse_pdf_beam(mock_context, **test_inputs)
         assert "error" in response_dict
         assert "pdf_base64" in response_dict["error"]
 
-    def test_beam_function_invalid_base64(self) -> None:
+    def test_beam_function_invalid_base64(
+        self,
+        mock_context: beam.Context,
+        mock_doc_converter: MagicMock,
+    ) -> None:
         """Test calling the function with invalid base64."""
+        mock_context.on_start_value = mock_doc_converter
         test_inputs = {
             "pdf_base64": "this is not valid base64",
             "filename": "test.pdf"
         }
-        response_dict = parse_pdf_beam(**test_inputs)
+        response_dict = parse_pdf_beam(mock_context, **test_inputs)
         assert "error" in response_dict
         assert "Invalid base64" in response_dict["error"]
 
     # Add more tests for other options (force_ocr, roll_up_groups=False)
-    # and potential error conditions within the parsing logic itself. 
+    # by adjusting the inputs and the expected call to the mock_process function. 
