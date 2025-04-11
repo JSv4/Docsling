@@ -2,14 +2,23 @@ version: '3.8'
 
 services:
   web:
-    build: .
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    build:
+      context: .
+      # Target the 'builder' stage for development, which includes dev dependencies
+      target: builder
+    # Command for development with hot-reloading
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir /app/app
     volumes:
-      - ./app:/code/app # Mount local code for hot-reloading
+      # Mount local app code into the container at the location where it was copied in the Dockerfile
+      # This enables hot-reloading.
+      - ./app:/app/app
     ports:
       - "8000:8000" # Map host port 8000 to container port 8000
     environment:
-      # Add any environment variables needed by your app here
+      # Ensure DOCLING_MODELS_PATH is consistent if needed, though it's set in Dockerfile
+      # DOCLING_MODELS_PATH: /app/docling_models
+      # Add any other environment variables needed by your app here
       # EXAMPLE_VAR: example_value
+      pass
     env_file:
       - .env # Optional: Load environment variables from a .env file 

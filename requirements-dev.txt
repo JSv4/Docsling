@@ -1,1 +1,13 @@
- 
+# Include production requirements
+-r requirements.txt
+
+# Testing tools
+pytest
+pytest-asyncio
+pytest-mock
+httpx
+
+# Optional: Linters, formatters, etc.
+# flake8
+# black
+# mypy 
