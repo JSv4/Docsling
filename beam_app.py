@@ -9,8 +9,8 @@ from typing import Optional, Dict, Any, Tuple
 # Adjust resource requirements as needed. PDF processing can be intensive.
 APP_NAME = "docling-parser"
 CPU_COUNT = 4
-MEMORY_SIZE = "8Gi"
-# GPU = "T4" # Add if using GPU-accelerated models, otherwise omit
+MEMORY_SIZE = "16Gi"
+GPU = "T4" # Add if using GPU-accelerated models, otherwise omit
 PYTHON_VERSION = "python3.10" # Match your project's Python version
 
 # --- Logging Setup ---
@@ -27,38 +27,41 @@ MODELS_TARGET_PATH = "/app/docling_models"
 
 # --- Define Beam Image ---
 # Replicate dependencies from requirements.txt and Dockerfile system installs
-image = beam.Image(
-    python_version=PYTHON_VERSION,
-    python_packages=[
-        "fastapi", # Keep if models depend on it, otherwise optional
-        "uvicorn[standard]", # Optional for beam app
-        "pydantic>=2.0.0,<3.0.0", # Ensure version compatibility
-        # Docling dependencies
-        "docling",
-        "docling-core",
-        # Other parser dependencies
-        "numpy",
-        "pdf2image",
-        "python-pytesseract",
-        "pdfplumber",
-        "shapely",
-        "easyocr", # Ensure easyocr is listed
-        # Add any other specific versions if needed
-    ],
-    apt_packages=[
-        "tesseract-ocr", # For pytesseract
-        # "tesseract-ocr-eng", # Add specific language packs if needed
-        "poppler-utils", # For pdf2image
-    ],
-    commands=[
-        "pip install --upgrade pip",
-        # --- Download Models using Python Script ---
-        # Note: Beam copies the deployment dir to /app, so scripts/download_models.py becomes /app/scripts/download_models.py
-        f"python /app/scripts/download_models.py --path {MODELS_TARGET_PATH}", # Add --force if needed
-        # Optional verification
-        # f"ls -l {MODELS_TARGET_PATH}",
-        # --- End Model Download ---
-    ],
+image = (
+    beam.Image(
+        python_version=PYTHON_VERSION,
+        python_packages=[
+            "fastapi", # Keep if models depend on it, otherwise optional
+            "uvicorn[standard]", # Optional for beam app
+            "pydantic>=2.0.0,<3.0.0", # Ensure version compatibility
+            "pydantic-settings>=2.0.0,<3.0.0", # For loading settings
+            # Docling dependencies
+            "docling",
+            "docling-core",
+            # Other parser dependencies
+            "numpy",
+            "pdf2image",
+            "pytesseract", # Corrected name from requirements.txt
+            "pdfplumber",
+            "shapely",
+            "easyocr", # Ensure easyocr is listed
+            # Add any other specific versions if needed
+        ],
+        # Keep commands for pip upgrade and model download
+        commands=[
+            "pip install --upgrade pip",
+            # --- Download Models using Python Script ---
+            f"python /app/scripts/download_models.py --path {MODELS_TARGET_PATH}", # Add --force if needed
+        ],
+    )
+    # Chain apt package installation using add_commands
+    .add_commands([
+        "apt-get update",
+        # Combine install commands, use --no-install-recommends, add -y
+        "apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng poppler-utils",
+        # Clean up apt cache
+        "rm -rf /var/lib/apt/lists/*"
+    ])
 )
 
 # --- Loader Function ---
@@ -115,7 +118,7 @@ def load_parser_components() -> Optional[Any]: # Return type depends on what you
     name=APP_NAME,
     cpu=CPU_COUNT,
     memory=MEMORY_SIZE,
-    # gpu=GPU, # Uncomment if GPU is needed
+    gpu=GPU, # Uncomment if GPU is needed
     image=image,
     keep_warm_seconds=60, # Keep warm for 60 seconds
     on_start=load_parser_components, # Add the loader function here

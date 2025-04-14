@@ -1,6 +1,16 @@
 import numpy as np
 from pydantic import BaseModel, Field
-from typing import Optional, Union, List, Dict, Tuple, Any
+from typing import Optional, Union, List, Dict, Tuple, Any, Literal
+
+# --- Request Models ---
+
+class ParseRequest(BaseModel):
+    """Defines the expected JSON body for the /parse/ endpoint."""
+    filename: str = Field(..., description="The original filename of the PDF.")
+    pdf_base64: str = Field(..., description="Base64 encoded string of the PDF content.")
+    force_ocr: bool = Field(False, description="Force OCR processing even if text is detectable.")
+    roll_up_groups: bool = Field(False, description="Roll up items under the same heading into single relationships.")
+    llm_enhanced_hierarchy: bool = Field(False, description="Apply experimental LLM-based hierarchy enhancement.")
 
 # --- PAWLS Types ---
 # Based on PAWLS format (https://github.com/allenai/pawls)

@@ -8,9 +8,10 @@ docling-core
 # Other dependencies from the original parser
 numpy
 pdf2image
-python-pytesseract
+pytesseract
 pdfplumber
 shapely # Includes STRtree
 # Potentially needed for file handling if remote storage was used via default_storage
 # requests
+pydantic-settings>=2.0.0,<3.0.0 # For loading settings from env/dotenv
 # boto3 # or other relevant storage library 

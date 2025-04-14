@@ -1,6 +1,7 @@
 import os
 import logging
-from pydantic import BaseSettings
+from pydantic_settings import BaseSettings # Import from pydantic_settings
+
 
 logger = logging.getLogger(__name__)
 

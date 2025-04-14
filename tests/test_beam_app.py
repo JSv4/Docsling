@@ -4,7 +4,10 @@ import json
 import os
 from pathlib import Path
 from typing import Dict, Any, Optional
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+# Import the mock from conftest (it's already applied to sys.modules)
+from conftest import beam_mock
 
 # Import the function decorated with @beam.endpoint
 import beam
@@ -94,6 +97,51 @@ def mock_models_path(monkeypatch):
          # For simplicity, the mock assumes they *aren't* easily accessible
          # relative to the '/app/' path during local tests.
 
+# Test data
+@pytest.fixture
+def sample_beam_input():
+    return {
+        "filename": "test.pdf",
+        "pdf_base64": base64.b64encode(b"%PDF-1.0 test").decode('utf-8'),
+        "force_ocr": False,
+        "roll_up_groups": True
+    }
+
+@pytest.fixture
+def mock_context():
+    context = MagicMock()
+    # Mock the on_start_value to simulate a loaded DocumentConverter
+    context.on_start_value = MagicMock()
+    return context
+
+# Tests
+def test_parse_pdf_beam_validates_inputs(mock_context):
+    # Test with missing required inputs
+    result = parse_pdf_beam(mock_context, filename="test.pdf")
+    assert "error" in result
+    assert "pdf_base64" in result["error"]
+    
+    result = parse_pdf_beam(mock_context, pdf_base64="invalid")
+    assert "error" in result
+    assert "filename" in result["error"]
+
+@patch('beam_app.base64.b64decode')
+@patch('beam_app._internal_process_document')
+def test_parse_pdf_beam_processes_document(mock_process, mock_b64decode, mock_context, sample_beam_input):
+    # Setup mocks
+    mock_b64decode.return_value = b"mocked pdf content"
+    mock_process.return_value = MagicMock()
+    mock_process.return_value.model_dump.return_value = {"title": "Test Doc"}
+    
+    # Call the function
+    result = parse_pdf_beam(mock_context, **sample_beam_input)
+    
+    # Verify
+    assert "result" in result
+    assert result["result"] == {"title": "Test Doc"}
+    mock_process.assert_called_once()
+
+# Add more tests as needed
 
 class TestBeamAppFunction:
     """Tests for the parse_pdf_beam function."""

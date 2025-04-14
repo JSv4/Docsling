@@ -6,8 +6,10 @@ pytest
 pytest-asyncio
 pytest-mock
 httpx
+beam-client
 
 # Optional: Linters, formatters, etc.
+pydantic-settings>=2.0.0,<3.0.0 # For loading settings from env/dotenv
 # flake8
 # black
 # mypy 

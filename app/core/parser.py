@@ -12,14 +12,14 @@ import pytesseract
 from docling.datamodel.base_models import ConversionStatus, DocumentStream, InputFormat
 from docling.datamodel.pipeline_options import EasyOcrOptions, PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling_core.types.doc.document import ListItem
 from docling_core.types.doc import (
     DocItemLabel,
     DoclingDocument,
     SectionHeaderItem,
     TextItem,
-    ListItem, # Added ListItem import
-    BBox as DoclingBBox, # Explicitly import Docling's BBox
-    Page as DoclingPage, # Explicitly import Docling's Page
+    BoundingBox as DoclingBBox, # Explicitly import Docling's BBox
+    PageItem as DoclingPage, # Explicitly import Docling's Page
 )
 from docling_core.transforms.chunker.hierarchical_chunker import HierarchicalChunker
 from shapely.geometry import box
