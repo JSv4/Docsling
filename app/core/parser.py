@@ -816,7 +816,7 @@ def _internal_process_document(
             heading_text: Optional[str] = None
 
             # Identify the parent heading for this chunk
-            if chunk.meta and chunk.meta.headings:
+            if chunk.meta.headings:
                 # Assuming the first heading is the primary one for the chunk
                 heading_text = chunk.meta.headings[0].strip()
                 parent_ref = text_to_ref_lookup.get(heading_text)

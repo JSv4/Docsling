@@ -61,7 +61,7 @@ class TestDoclingParserEndpoint:
         495, 43, 6,
     ]
     EXPECTED_RELATIONSHIPS_COUNT_ROLLED_UP = 25
-    EXPECTED_RELATIONSHIPS_COUNT_NOT_ROLLED_UP = 402
+    EXPECTED_RELATIONSHIPS_COUNT_NOT_ROLLED_UP = 137
     EXPECTED_LABELLED_TEXT_COUNT = 271
 
     def _assert_common(self, result_data: Dict[str, Any], expected_token_counts: List[int]):

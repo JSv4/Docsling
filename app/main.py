@@ -114,6 +114,7 @@ async def parse_pdf(request: Request):
             )
             
         logger.info(f"Received parse request for file: {filename}")
+        logger.info(f"Passing options to parser - force_ocr: {force_ocr}, roll_up_groups: {roll_up_groups}, llm_enhanced_hierarchy: {llm_enhanced_hierarchy}")
         
         # Call the dynamic initialization processing function
         result_model = process_document_dynamic_init(
