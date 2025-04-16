@@ -41,10 +41,51 @@ from app.models.types import (
 from app.utils.files import check_if_pdf_needs_ocr
 from app.utils.layout import reassign_annotation_hierarchy
 
+# Import necessary Docling components based on the new documentation
+from docling.datamodel.base_models import InputFormat, DocumentStream
+from docling.datamodel.pipeline_options import PdfPipelineOptions # Key import
+from docling.datamodel.document import ConversionResult
+
 logger = logging.getLogger(__name__)
 # Configure basic logging if running standalone, Uvicorn might override this
 # logging.basicConfig(level=logging.INFO)
 
+# --- Global variable for pre-loaded converter (optional, for optimization) ---
+# Keep this pattern if desired, but initialization needs adjustment
+_global_doc_converter: Optional[DocumentConverter] = None
+
+def _initialize_converter(models_path: str) -> DocumentConverter:
+    """Initializes the DocumentConverter with the specified models path."""
+    logger.info(f"Initializing DocumentConverter with artifacts_path: {models_path}")
+    try:
+        # --- NEW INITIALIZATION METHOD ---
+        # Create pipeline options specifying the artifacts path
+        pipeline_options = PdfPipelineOptions(artifacts_path=models_path)
+
+        # Configure the DocumentConverter with these options for PDF format
+        doc_converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            }
+        )
+        # --- END NEW INITIALIZATION METHOD ---
+
+        logger.info("DocumentConverter initialized successfully.")
+        return doc_converter
+    except Exception as e:
+        logger.exception(f"Failed to initialize DocumentConverter: {e}")
+        raise RuntimeError(f"Could not initialize DocumentConverter. Check models path ('{models_path}') and dependencies.") from e
+
+def get_global_converter(models_path: str) -> DocumentConverter:
+    """Gets or initializes the global DocumentConverter instance."""
+    global _global_doc_converter
+    if _global_doc_converter is None:
+        logger.info("Global DocumentConverter not found, initializing...")
+        _global_doc_converter = _initialize_converter(models_path)
+    else:
+        # Optional: Add check if models_path has changed, though unlikely in prod
+        logger.debug("Using pre-initialized global DocumentConverter.")
+    return _global_doc_converter
 
 # --- Helper Functions ---
 
@@ -100,111 +141,138 @@ def convert_docling_item_to_annotation(
         (e.g., missing provenance, bounding box, or page data).
     """
     if not (hasattr(item, "prov") and item.prov):
-        logger.debug(f"Item {getattr(item, 'self_ref', 'UNKNOWN')} has no provenance, cannot convert to annotation.")
+        logger.warning(f"Item {getattr(item, 'self_ref', 'UNKNOWN')} lacks provenance, skipping annotation.")
         return None
 
-    # Assuming provenance is ordered and the first one is representative for bbox/page
+    # Ensure prov is not empty and first element has bbox
+    if not item.prov or not item.prov[0].bbox:
+        logger.warning(f"Item {getattr(item, 'self_ref', 'UNKNOWN')} provenance lacks bbox, skipping annotation.")
+        return None
+
     first_prov = item.prov[0]
-    if not first_prov.bbox or not isinstance(first_prov.bbox, DoclingBBox):
-        logger.debug(f"Item {getattr(item, 'self_ref', 'UNKNOWN')} provenance lacks a valid bounding box.")
-        return None
+    bbox = first_prov.bbox
+    # Docling uses 1-based page numbers, convert to 0-based for OpenContracts
+    page_no = first_prov.page_no - 1
+    item_text = getattr(item, "text", "")
+    item_ref = getattr(item, "self_ref", None)
+    if item_ref is None:
+        logger.warning(f"Item text='{item_text[:50]}...' lacks self_ref, skipping annotation.")
+        return None # Cannot create annotation without an ID
 
-    # Docling uses 1-based page numbers, convert to 0-based for internal use
-    page_no_0_based = first_prov.page_no - 1
-    item_text: str = getattr(item, "text", "")
-    item_id: Optional[str] = getattr(item, "self_ref", None)
-    item_label: DocItemLabel = getattr(item, "label", DocItemLabel.UNKNOWN)
-
-    page_width, page_height = page_dimensions.get(page_no_0_based, (0.0, 0.0))
-    if page_height == 0.0 or page_width == 0.0:
-        logger.warning(f"No valid page dimensions found for page {page_no_0_based} (item {item_id}). Cannot calculate screen coordinates.")
-        return None
-
-    # Convert Docling BBox (origin bottom-left) to screen coordinates (origin top-left)
-    # Docling BBox: l, b, r, t (left, bottom, right, top)
-    # Screen Bounds: left, top, right, bottom
-    docling_bbox: DoclingBBox = first_prov.bbox
-    screen_left = docling_bbox.l
-    screen_right = docling_bbox.r
-    # PDF Y coordinates increase upwards, Screen Y coordinates increase downwards
-    screen_top = page_height - docling_bbox.t
-    screen_bottom = page_height - docling_bbox.b
-
-    # Ensure coordinates are valid
-    if screen_left >= screen_right or screen_top >= screen_bottom:
-         logger.warning(f"Invalid screen coordinates calculated for item {item_id} on page {page_no_0_based}: L={screen_left}, T={screen_top}, R={screen_right}, B={screen_bottom}. Skipping token search.")
-         # Create annotation without tokens? Or skip entirely? Let's skip token search for now.
-         token_ids = []
+    # --- Get the label safely ---
+    item_label_raw = getattr(item, "label", None)
+    item_label_str: str
+    if isinstance(item_label_raw, DocItemLabel):
+        # Assuming DocItemLabel enum values are strings or have a sensible str representation
+        item_label_str = str(item_label_raw.value) if hasattr(item_label_raw, 'value') else str(item_label_raw)
+    elif isinstance(item_label_raw, str):
+        item_label_str = item_label_raw # Use if it's already a string
     else:
-        # Create a Shapely box for spatial querying using screen coordinates
-        # Note: PAWLS tokens are stored with top-left origin, matching screen coordinates.
-        item_screen_bbox = box(screen_left, screen_top, screen_right, screen_bottom)
-
-        # Retrieve spatial index and token data for the page
-        spatial_index = spatial_indices_by_page.get(page_no_0_based)
-        page_tokens = tokens_by_page.get(page_no_0_based) # List of PawlsTokenPythonType
-        page_token_indices_array = token_indices_by_page.get(page_no_0_based) # Array of original indices (0..N-1)
-
-        if spatial_index is None or page_tokens is None or page_token_indices_array is None:
-            logger.warning(
-                f"Missing spatial index, tokens, or token indices for page {page_no_0_based} (item {item_id}). Cannot find associated tokens."
-            )
-            token_ids = []
-        else:
-            try:
-                # Query the STRtree for candidate token indices intersecting the item's bbox
-                # The STRtree was built using geometries derived from PawlsTokenPythonType coordinates (x, y, x+width, y+height)
-                candidate_indices = spatial_index.query(item_screen_bbox)
-
-                # Refine candidates by checking actual intersection (STRtree query might return items in the envelope)
-                # Ensure geometries are available and compatible with shapely STRtree usage
-                # Note: Accessing `geometries` directly might be deprecated or internal; `query` should return indices.
-                # We need the original token indices corresponding to the geometries found.
-                intersecting_token_original_indices = []
-                geometries = spatial_index.geometries_array # Access the array used to build the tree
-                for idx in candidate_indices:
-                    # Check intersection between the item bbox and the token geometry at the candidate index
-                    if item_screen_bbox.intersects(geometries[idx]):
-                        # Map the index within the STRtree's geometry array back to the original token index
-                        original_token_index = page_token_indices_array[idx]
-                        intersecting_token_original_indices.append(original_token_index)
+        item_label_str = "" # Default to empty string if missing or not an expected type
+        if item_label_raw is not None:
+             logger.warning(f"Item {item_ref} has unexpected label type: {type(item_label_raw)}. Using empty string.")
+    # --- End safe label handling ---
 
 
-                # Create Point objects using the 0-based page index and 0-based token index
-                token_ids = [
-                    Point(pageIndex=page_no_0_based, tokenIndex=int(idx))
-                    for idx in sorted(intersecting_token_original_indices)
-                ]
-                # logger.debug(f"Found {len(token_ids)} tokens for item {item_id} on page {page_no_0_based}")
-
-            except Exception as query_error:
-                 logger.error(f"Error querying STRtree for item {item_id} on page {page_no_0_based}: {query_error}", exc_info=True)
-                 token_ids = []
+    # Get page height for coordinate transformation
+    page_dims = page_dimensions.get(page_no)
+    if page_dims is None:
+        logger.warning(f"No page dimensions found for page {page_no} (0-based) for item {item_ref}, skipping annotation.")
+        return None
+    _, page_height = page_dims
 
 
-    # Create the annotation structure for this specific page
-    annotation_json_page = OpenContractsSinglePageAnnotationType(
-        bounds=Bounds(
-            left=screen_left,
-            top=screen_top,
-            right=screen_right,
-            bottom=screen_bottom,
-        ),
-        tokensJsons=token_ids, # Use field name expected by frontend
-        rawText=item_text, # Text for this specific item/page (might differ if annotation spans pages)
-    )
+    # Transform Y coordinates
+    try:
+        screen_bottom = float(page_height) - float(bbox.b)
+        screen_top = float(page_height) - float(bbox.t)
+        left = float(bbox.l)
+        right = float(bbox.r)
+    except (TypeError, ValueError) as e:
+         logger.warning(f"Invalid bbox coordinates for item {item_ref} on page {page_no}: {bbox}. Error: {e}. Skipping annotation.")
+         return None
 
-    # Create the main annotation object
-    annotation = OpenContractsAnnotationPythonType(
-        id=item_id,
-        annotationLabel=str(item_label.value), # Use the string value of the enum
-        rawText=item_text, # Full text of the item
-        page=page_no_0_based, # Primary page index (0-based)
-        annotationJson={page_no_0_based: annotation_json_page}, # Use alias
-        parent_id=None, # Parent ID will be assigned later based on hierarchy
-        annotation_type="TOKEN_LABEL",
-        structural=True,
-    )
+
+    # Spatial query
+    chunk_bbox = box(left, screen_top, right, screen_bottom)
+    spatial_index = spatial_indices_by_page.get(page_no)
+    tokens = tokens_by_page.get(page_no)
+    token_indices_array = token_indices_by_page.get(page_no)
+
+    if spatial_index is None or tokens is None or token_indices_array is None:
+        logger.warning(
+            f"No spatial index or tokens found for page {page_no} (0-based) for item {item_ref}; skipping annotation."
+        )
+        return None
+
+    # Perform spatial query safely
+    token_ids = [] # Default to empty list
+    try:
+        candidate_indices = spatial_index.query(chunk_bbox)
+        # Ensure candidate_indices is iterable and contains integers if not empty
+        if isinstance(candidate_indices, np.ndarray) and candidate_indices.size > 0:
+            # Ensure indices are within bounds of the geometries array
+            valid_indices = candidate_indices[candidate_indices < len(spatial_index.geometries)]
+            if len(valid_indices) < len(candidate_indices):
+                 logger.warning(f"Some candidate token indices out of bounds for item {item_ref} on page {page_no}.")
+
+            if len(valid_indices) > 0:
+                candidate_geometries = spatial_index.geometries.take(valid_indices)
+                # Check for intersection
+                intersects_mask = [geom.intersects(chunk_bbox) if geom.is_valid else False for geom in candidate_geometries]
+                actual_indices = valid_indices[intersects_mask]
+
+                # Ensure indices are valid for token_indices_array
+                if actual_indices.size > 0:
+                     valid_actual_indices = actual_indices[actual_indices < len(token_indices_array)]
+                     if len(valid_actual_indices) < len(actual_indices):
+                          logger.warning(f"Some actual token indices out of bounds for token_indices_array on item {item_ref}, page {page_no}.")
+
+                     if valid_actual_indices.size > 0:
+                          token_indices = token_indices_array[valid_actual_indices]
+                          token_ids = [
+                              {"pageIndex": page_no, "tokenIndex": int(idx)} for idx in sorted(token_indices)
+                          ]
+                     else:
+                          logger.warning(f"No valid actual token indices after bounds check for item {item_ref} on page {page_no}.")
+                else:
+                     logger.warning(f"No actual tokens intersect bbox for item {item_ref} on page {page_no}.")
+            else:
+                 logger.warning(f"No valid candidate tokens after bounds check for item {item_ref} on page {page_no}.")
+        elif candidate_indices is not None and len(candidate_indices) > 0:
+             logger.warning(f"Spatial query for item {item_ref} returned unexpected type: {type(candidate_indices)}")
+        # else: No candidate tokens found, token_ids remains empty
+
+    except Exception as e:
+        logger.error(f"Error during spatial query for item {item_ref} on page {page_no}: {e}", exc_info=True)
+        token_ids = [] # Default to empty if query fails
+
+
+    # Create the annotation_json structure
+    internal_annotation_details: dict[int, OpenContractsSinglePageAnnotationType] = {
+        page_no: {
+            "bounds": {
+                "left": left,
+                "top": screen_top,
+                "right": right,
+                "bottom": screen_bottom,
+            },
+            "tokensJsons": token_ids,
+            "rawText": item_text,
+        }
+    }
+
+    # Create the full annotation structure
+    annotation: OpenContractsAnnotationPythonType = {
+        "id": item_ref,
+        "annotationLabel": item_label_str,
+        "rawText": item_text,
+        "page": page_no,
+        "annotationJson": internal_annotation_details,
+        "parent_id": None,  # Will be assigned later during chunk processing
+        "annotation_type": "TOKEN_LABEL",
+        "structural": True, # Assuming these are structural elements from Docling
+    }
 
     return annotation
 
@@ -896,93 +964,319 @@ def _internal_process_document(
 def process_document_dynamic_init(
     pdf_bytes: bytes,
     pdf_filename: str,
-    models_path: str, # Path to models within the execution environment
+    models_path: str,
     force_ocr: bool = False,
     roll_up_groups: bool = False,
     llm_enhanced_hierarchy: bool = False,
 ) -> Optional[OpenContractDocExport]:
     """
-    Processes a PDF, initializing the Docling converter dynamically.
-
-    This is suitable for environments like serverless functions where global
-    initialization might be problematic or needs environment-specific paths.
+    Processes a PDF document using a dynamically initialized DocumentConverter,
+    extracts metadata, annotations, and relationships.
 
     Args:
-        pdf_bytes: The content of the PDF file.
-        pdf_filename: Original filename.
-        models_path: The filesystem path to the Docling models directory.
-        force_ocr: If True, forces OCR.
-        roll_up_groups: If True, groups items under headings.
-        llm_enhanced_hierarchy: If True, attempts LLM hierarchy (Placeholder).
+        pdf_bytes: The raw bytes of the PDF file.
+        pdf_filename: The original filename (for logging/metadata).
+        models_path: Path to the directory containing downloaded Docling models.
+        force_ocr: Flag to force OCR even if text layer exists.
+        roll_up_groups: Flag to enable roll-up groups feature for relationships.
+        llm_enhanced_hierarchy: Flag for LLM enhanced hierarchy processing.
 
     Returns:
-        An OpenContractDocExport object or None if processing fails.
+        An OpenContractDocExport object if successful, None otherwise.
     """
-    try:
-        logger.info(f"Dynamically initializing DocumentConverter with models path: {models_path}")
-        if not os.path.exists(models_path) or not os.path.isdir(models_path):
-             # Log a critical error and return None if models aren't found
-             logger.error(f"Docling models path '{models_path}' does not exist or is not a directory.")
-             raise FileNotFoundError(f"Docling models path '{models_path}' not found.")
+    logger.info(f"Starting dynamic processing for {pdf_filename}...")
+    logger.info(f"Options: force_ocr={force_ocr}, roll_up_groups={roll_up_groups}, llm_enhanced_hierarchy={llm_enhanced_hierarchy}")
 
-        # Initialize converter inside the function
-        ocr_options = EasyOcrOptions(model_storage_directory=models_path)
+    # --- 1. Initialize DocumentConverter (Dynamically) ---
+    try:
+        if not os.path.exists(models_path):
+            logger.error(f"Docling models path '{models_path}' does not exist.")
+            return None
+
+        # Configure Docling options
+        ocr_options = EasyOcrOptions(
+            model_storage_directory=models_path,
+            # Add other OCR options if needed, e.g., gpu=True if supported/desired
+        )
         pipeline_options = PdfPipelineOptions(
             artifacts_path=models_path,
-            do_ocr=True,
-            do_table_structure=True,
-            generate_page_images=True,
+            do_ocr=True, # Let Docling decide based on its internal logic unless overridden? Or rely on our force_ocr?
+                       # Setting True ensures OCR models are loaded if needed.
+                       # The _generate_pawls_content function will ultimately decide based on check_if_pdf_needs_ocr or force_ocr.
+            do_table_structure=True, # Keep table structure extraction enabled
+            generate_page_images=True, # Needed for OCR path in _generate_pawls_content
             ocr_options=ocr_options,
+            # Add other pipeline options if needed
         )
-        local_doc_converter = DocumentConverter(
+        doc_converter = DocumentConverter(
             format_options={
                 InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
             }
         )
-        logger.info("Dynamic DocumentConverter initialized successfully.")
-
-        # Call the internal processing logic with the initialized converter
-        return _internal_process_document(
-            doc_converter=local_doc_converter,
-            pdf_bytes=pdf_bytes,
-            pdf_filename=pdf_filename,
-            force_ocr=force_ocr,
-            roll_up_groups=roll_up_groups,
-            llm_enhanced_hierarchy=llm_enhanced_hierarchy,
-        )
-
-    except FileNotFoundError as fnf_error:
-        logger.error(f"Failed dynamic initialization: {fnf_error}")
-        return None # Return None if models path issue prevents initialization
+        logger.info("DocumentConverter initialized dynamically.")
     except Exception as e:
-        logger.error(f"Failed to dynamically initialize Docling converter or process document: {e}", exc_info=True)
+        logger.error(f"Failed to initialize DocumentConverter: {e}", exc_info=True)
+        return None
+
+    # --- 2. Convert PDF using Docling ---
+    doc_stream = DocumentStream(name=pdf_filename, stream=BytesIO(pdf_bytes))
+    try:
+        conv_res = doc_converter.convert(doc_stream)
+        if conv_res.status != ConversionStatus.SUCCESS or not conv_res.document:
+            logger.error(f"Docling conversion failed for {pdf_filename}. Status: {conv_res.status}, Errors: {conv_res.errors}")
+            return None
+        doc: DoclingDocument = cast(DoclingDocument, conv_res.document)
+        logger.info(f"Successfully converted {pdf_filename} using Docling.")
+
+    except Exception as e:
+        logger.error(f"Exception during Docling conversion for {pdf_filename}: {e}", exc_info=True)
+        return None
+
+    # --- 3. Generate PAWLS Content and Base Data ---
+    try:
+        (
+            pawls_pages,
+            spatial_indices_by_page,
+            tokens_by_page,
+            token_indices_by_page,
+            page_dimensions,
+            content,
+        ) = _generate_pawls_content(doc, pdf_bytes, force_ocr)
+
+        if not pawls_pages:
+             logger.error(f"Failed to generate PAWLS content for {pdf_filename}.")
+             return None
+
+    except Exception as e:
+        logger.error(f"Exception during PAWLS generation for {pdf_filename}: {e}", exc_info=True)
+        return None
+
+    # --- 4. Extract Metadata ---
+    default_title = Path(pdf_filename).stem
+    extracted_title = _extract_title(doc, default_title)
+    extracted_description = _extract_description(doc, extracted_title)
+    logger.info(f"Extracted Title: '{extracted_title}'")
+    # logger.debug(f"Extracted Description: '{extracted_description}'") # Can be long
+
+    # --- 5. Build Base Annotations and Text Lookup ---
+    base_annotation_lookup: dict[str, OpenContractsAnnotationPythonType] = {}
+    text_lookup: dict[str, str] = {}
+    try:
+        text_lookup = build_text_lookup(doc)
+        # logger.debug(f"Built text lookup with {len(text_lookup)} entries.")
+
+        valid_annotations_count = 0
+        for text_item in doc.texts:
+            annotation = convert_docling_item_to_annotation(
+                text_item,
+                spatial_indices_by_page,
+                tokens_by_page,
+                token_indices_by_page,
+                page_dimensions,
+            )
+            if annotation and annotation.get("id"):
+                base_annotation_lookup[annotation["id"]] = annotation
+                valid_annotations_count += 1
+            elif annotation:
+                 logger.warning(f"Generated annotation missing ID for text: {getattr(text_item, 'text', '')[:50]}...")
+            # else: Annotation failed, warning already logged in convert_ function
+
+        logger.info(f"Generated {valid_annotations_count} base annotations from {len(doc.texts)} text items.")
+        if not base_annotation_lookup:
+             logger.warning(f"No base annotations could be generated for {pdf_filename}. Proceeding without annotations/relationships.")
+             # Decide if this should be an error or continue with empty lists
+
+    except Exception as e:
+        logger.error(f"Exception during base annotation generation for {pdf_filename}: {e}", exc_info=True)
+        return None # Treat failure here as critical
+
+    # --- 6. Chunk Document and Build Hierarchy/Relationships ---
+    final_annotations: list[OpenContractsAnnotationPythonType] = []
+    relationships: list[OpenContractsRelationshipPythonType] = []
+    try:
+        chunker = HierarchicalChunker()
+        chunks = list(chunker.chunk(dl_doc=doc))
+        logger.info(f"Generated {len(chunks)} chunks using HierarchicalChunker.")
+
+        # Data structures for relationship building
+        flattened_heading_annot_id_to_children: dict[str, list[str]] = {}
+        heading_annot_id_to_children: list[tuple[Optional[str], list[str]]] = [] # Allow None for parent_ref
+
+        processed_annotation_ids = set()
+
+        for i, chunk in enumerate(chunks):
+            parent_ref: Optional[str] = None
+            if chunk.meta.headings:
+                if len(chunk.meta.headings) > 1:
+                    logger.warning(f"Chunk {i} has multiple headings ({len(chunk.meta.headings)}); using the first one.")
+                heading_text = chunk.meta.headings[0].strip()
+                parent_ref = text_lookup.get(heading_text)
+                if not parent_ref:
+                    logger.warning(f"Could not find annotation ref for heading text: '{heading_text}' in chunk {i}.")
+                # else: logger.debug(f"Chunk {i} heading '{heading_text}' maps to ref: {parent_ref}")
+
+                # Initialize parent in relationship structures if needed
+                if parent_ref:
+                    if roll_up_groups:
+                        if parent_ref not in flattened_heading_annot_id_to_children:
+                            flattened_heading_annot_id_to_children[parent_ref] = []
+                    # For non-rolled-up, we add tuples later as children are found
+
+            # Process items within the chunk
+            current_chunk_children: list[str] = []
+            if hasattr(chunk.meta, "doc_items"):
+                # logger.debug(f"Chunk {i} has {len(chunk.meta.doc_items)} doc_items.")
+                for item in chunk.meta.doc_items:
+                    item_ref = getattr(item, "self_ref", None)
+                    if not item_ref:
+                        logger.warning(f"Doc item in chunk {i} lacks self_ref, cannot link.")
+                        continue
+
+                    annotation = base_annotation_lookup.get(item_ref)
+                    if annotation:
+                        # Assign parent_id to the annotation IN THE LOOKUP
+                        annotation["parent_id"] = parent_ref
+                        processed_annotation_ids.add(item_ref) # Mark as processed
+
+                        # Add to relationship structures
+                        if parent_ref:
+                            current_chunk_children.append(item_ref)
+                            if roll_up_groups:
+                                # Check ensures parent_ref exists from heading check above
+                                flattened_heading_annot_id_to_children[parent_ref].append(item_ref)
+                        # else: Item has no parent heading in this chunk
+
+                    else:
+                        # This can happen if convert_docling_item_to_annotation failed for this item earlier
+                        logger.warning(f"Annotation not found in base_annotation_lookup for item ref '{item_ref}' in chunk {i}.")
+
+            # Add non-rolled-up relationship entry for this chunk's parent/children
+            if not roll_up_groups and current_chunk_children:
+                 # We add even if parent_ref is None, representing top-level items for this chunk
+                 heading_annot_id_to_children.append((parent_ref, current_chunk_children))
+
+
+        # Add any annotations that weren't part of any chunk's doc_items
+        # These might be headers themselves or items missed by chunking logic
+        unprocessed_annotations = []
+        for ref, annot in base_annotation_lookup.items():
+            if ref not in processed_annotation_ids:
+                 # Keep existing parent_id if somehow assigned, otherwise it remains None
+                 unprocessed_annotations.append(annot)
+                 processed_annotation_ids.add(ref) # Add here to avoid duplicates if logic changes
+
+        # Combine processed annotations (which now have parent_ids) and unprocessed ones
+        final_annotations = list(base_annotation_lookup.values())
+        logger.info(f"Total final annotations: {len(final_annotations)} ({len(unprocessed_annotations)} were not in chunk doc_items).")
+
+
+        # Build relationship objects
+        rel_counter = 0
+        if roll_up_groups:
+            logger.info(f"Building rolled-up relationships from {len(flattened_heading_annot_id_to_children)} headings.")
+            for heading_id, child_ids in flattened_heading_annot_id_to_children.items():
+                 # Ensure heading_id itself exists as an annotation
+                 if heading_id not in base_annotation_lookup:
+                      logger.warning(f"Heading ID '{heading_id}' for rolled-up relationship not found in annotations. Skipping relationship.")
+                      continue
+                 # Ensure child_ids exist as annotations
+                 valid_child_ids = [cid for cid in child_ids if cid in base_annotation_lookup]
+                 if len(valid_child_ids) < len(child_ids):
+                      logger.warning(f"Found {len(child_ids) - len(valid_child_ids)} missing child annotations for heading '{heading_id}'.")
+
+                 if not valid_child_ids:
+                      logger.warning(f"No valid child annotations found for heading '{heading_id}'. Skipping relationship.")
+                      continue
+
+                 relationship_entry: OpenContractsRelationshipPythonType = {
+                    "id": f"group-rel-{rel_counter}",
+                    "relationshipLabel": "GROUP", # Use standard label?
+                    "source_annotation_ids": [heading_id],
+                    "target_annotation_ids": valid_child_ids,
+                    "structural": True,
+                 }
+                 relationships.append(relationship_entry)
+                 rel_counter += 1
+        else:
+            logger.info(f"Building non-rolled-up relationships from {len(heading_annot_id_to_children)} chunk groups.")
+            for heading_id, child_ids in heading_annot_id_to_children:
+                 # Allow relationships for top-level items (heading_id is None) ?
+                 # Current spec requires source_annotation_ids. If None, maybe skip?
+                 if heading_id is None:
+                      logger.debug(f"Skipping relationship for chunk group with no heading ID (found {len(child_ids)} children).")
+                      continue
+
+                 if heading_id not in base_annotation_lookup:
+                      logger.warning(f"Heading ID '{heading_id}' for non-rolled-up relationship not found in annotations. Skipping relationship.")
+                      continue
+
+                 valid_child_ids = [cid for cid in child_ids if cid in base_annotation_lookup]
+                 if len(valid_child_ids) < len(child_ids):
+                      logger.warning(f"Found {len(child_ids) - len(valid_child_ids)} missing child annotations for non-rolled-up heading '{heading_id}'.")
+
+                 if not valid_child_ids:
+                      logger.warning(f"No valid child annotations found for non-rolled-up heading '{heading_id}'. Skipping relationship.")
+                      continue
+
+                 relationship_entry: OpenContractsRelationshipPythonType = {
+                    "id": f"group-rel-{rel_counter}",
+                    "relationshipLabel": "GROUP", # Use standard label?
+                    "source_annotation_ids": [heading_id],
+                    "target_annotation_ids": valid_child_ids,
+                    "structural": True,
+                 }
+                 relationships.append(relationship_entry)
+                 rel_counter += 1
+
+        logger.info(f"Generated {len(relationships)} relationships.")
+
+    except Exception as e:
+        logger.error(f"Exception during chunking or relationship building for {pdf_filename}: {e}", exc_info=True)
+        # Decide whether to return partial results or fail
+        # Returning partial results might be okay if annotations are generated but relationships fail
+        # For now, let's return None on failure in this critical step.
         return None
 
 
-# --- Original process_document (Optional - Keep for FastAPI if needed) ---
-# This version relies on the globally initialized 'doc_converter'
-# You might rename it or remove it if the FastAPI app also switches
-# to dynamic initialization.
+    # --- 7. Optional: LLM Enhanced Hierarchy ---
+    if llm_enhanced_hierarchy:
+        logger.info("Applying LLM-enhanced hierarchy (experimental)...")
+        try:
+            # Ensure the function handles the current annotation format
+            # Note: This function might modify parent_ids, potentially conflicting
+            # with the relationships just built. Careful coordination is needed.
+            # It might be better to run this *before* building relationships
+            # if it primarily adjusts parent_ids.
+            # Or, the relationship building needs to re-run based on new parent_ids.
+            # For now, applying it after relationship building based on original code placement.
+            enriched_annotations = reassign_annotation_hierarchy(final_annotations)
+            if enriched_annotations:
+                 final_annotations = enriched_annotations
+                 logger.info("LLM-enhanced hierarchy applied.")
+            else:
+                 logger.warning("LLM-enhanced hierarchy function returned None or empty list.")
+        except Exception as e:
+            logger.error(f"Exception during LLM-enhanced hierarchy processing: {e}", exc_info=True)
+            # Continue with non-enriched data if LLM step fails
 
-# def process_document(
-#     pdf_bytes: bytes,
-#     pdf_filename: str,
-#     force_ocr: bool = False,
-#     roll_up_groups: bool = False,
-#     llm_enhanced_hierarchy: bool = False,
-# ) -> Optional[OpenContractDocExport]:
-#     """
-#     Processes a PDF byte stream using the globally initialized Docling converter.
-#     (This is the original function structure)
-#     """
-#     if not doc_converter:
-#          logger.error("Global Docling converter not initialized. Cannot process document.")
-#          # Optionally, try dynamic init as a fallback?
-#          # return process_document_dynamic_init(...)
-#          return None
-#
-#     # Call the internal logic using the global converter
-#     return _internal_process_document(
-#         doc_converter=doc_converter,
-#         # ... pass other args ...
-#     ) 
+    # --- 8. Construct Final Export Data ---
+    export_data: OpenContractDocExport = {
+        "title": extracted_title,
+        "content": content,
+        "description": extracted_description,
+        "pageCount": len(pawls_pages),
+        "pawlsFileContent": pawls_pages,
+        "docLabels": [], # Placeholder - Add logic if document-level labels are needed
+        "labelledText": final_annotations,
+        "relationships": relationships,
+    }
+
+    logger.info(f"Successfully processed {pdf_filename}. Returning OpenContractDocExport.")
+    return OpenContractDocExport(**export_data)
+
+# ... rest of the file (DoclingParser class, etc.) ...
+
+# Make sure helper functions like _generate_pawls_content, _extract_title,
+# _extract_description, convert_docling_item_to_annotation, build_text_lookup
+# are defined within or imported into this file scope.
+# Also ensure reassign_annotation_hierarchy is available if llm_enhanced_hierarchy is used.

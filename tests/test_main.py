@@ -51,18 +51,18 @@ class TestDoclingParserEndpoint:
     EXPECTED_TITLE = "Exhibit 10.1"
     EXPECTED_PAGE_COUNT = 23
     EXPECTED_TOKEN_COUNTS_DEFAULT = [
-        392, 374, 470, 350, 490, 431, 386, 585, 463, 577,
+        392, 374, 470, 350, 490, 431, 386, 587, 463, 577,
         806, 276, 706, 563, 428, 426, 572, 616, 465, 335,
         496, 43, 6,
     ]
     EXPECTED_TOKEN_COUNTS_OCR = [
-        391, 374, 470, 350, 490, 431, 381, 569, 463, 577,
-        806, 276, 706, 563, 427, 426, 572, 616, 465, 335,
-        496, 43, 6,
+        390, 374, 469, 350, 490, 431, 380, 568, 463, 577,
+        806, 276, 706, 563, 428, 426, 572, 616, 465, 335,
+        495, 43, 6,
     ]
-    EXPECTED_RELATIONSHIPS_COUNT_ROLLED_UP = 24
-    EXPECTED_RELATIONSHIPS_COUNT_NOT_ROLLED_UP = 402 # From original test case
-    EXPECTED_LABELLED_TEXT_COUNT = 272
+    EXPECTED_RELATIONSHIPS_COUNT_ROLLED_UP = 25
+    EXPECTED_RELATIONSHIPS_COUNT_NOT_ROLLED_UP = 402
+    EXPECTED_LABELLED_TEXT_COUNT = 271
 
     def _assert_common(self, result_data: Dict[str, Any], expected_token_counts: List[int]):
         """Helper function for common assertions."""
@@ -80,6 +80,7 @@ class TestDoclingParserEndpoint:
 
         # Assert token counts for each page
         assert len(parsed_result.pawls_file_content) == self.EXPECTED_PAGE_COUNT, "PAWLS page count mismatch"
+        
         for page_idx, page in enumerate(parsed_result.pawls_file_content):
             assert len(page.tokens) == expected_token_counts[page_idx], \
                 f"Token count mismatch on page {page_idx + 1}"

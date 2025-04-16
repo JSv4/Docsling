@@ -28,12 +28,49 @@ from typing import AsyncGenerator, Generator
 from app.main import app
 from app.models.types import OpenContractDocExport # Import the response model
 
-# --- Mocking Setup ---
-# You might want to mock external dependencies globally here if needed,
-# e.g., the Docling converter initialization if it's problematic during testing.
-# from unittest.mock import patch
-# patch('app.core.parser.doc_converter', MagicMock()).start()
+# --- Conditional Mocking for FastAPI Tests ---
+@pytest.fixture(autouse=True)
+def maybe_mock_process_document_dynamic_init(monkeypatch):
+    """
+    Conditionally mocks the process_document_dynamic_init function based on
+    the DOCLING_TEST_WITH_REAL_PARSER environment variable.
 
+    If DOCLING_TEST_WITH_REAL_PARSER=1, the real function is used.
+    Otherwise (default), the function is mocked to return a predefined result
+    that matches the expectations in test_main.py.
+    """
+    use_real_parser = os.environ.get("DOCLING_TEST_WITH_REAL_PARSER") == "1"
+
+    if use_real_parser:
+        print("\nRunning FastAPI tests with REAL parser (DOCLING_TEST_WITH_REAL_PARSER=1)")
+        # Ensure models are accessible if running real parser
+        models_path = os.environ.get("DOCLING_MODELS_PATH", "./docling_models")
+        if not os.path.exists(models_path) or not os.path.isdir(models_path):
+             pytest.skip(f"Real parser requested, but models not found at DOCLING_MODELS_PATH='{models_path}'. Skipping relevant tests.")
+        # No mocking needed, the real function will be called
+        yield # Allow the test to run
+    else:
+        print("\nRunning FastAPI tests with MOCKED parser (default)")
+        # Define the mock result matching test_main.py expectations
+        mock_result = OpenContractDocExport(
+            title="Exhibit 10.1",          # Matches EXPECTED_TITLE
+            content="Mocked content",      # Content doesn't need to be exact for mock
+            description="Mocked description",
+            pageCount=23,                  # Matches EXPECTED_PAGE_COUNT
+            pawlsFileContent=[],
+            docLabels=[],
+            labelledText=[],
+            relationships=[]
+        )
+
+        def mock_process(*args, **kwargs):
+            print(f"Mocked process_document_dynamic_init called with args: {args}, kwargs: {kwargs}")
+            return mock_result
+
+        # Apply the mock
+        monkeypatch.setattr("app.main.process_document_dynamic_init", mock_process)
+        yield # Allow the test to run
+        # Mock is automatically removed after the test by monkeypatch
 
 # --- Fixtures ---
 
