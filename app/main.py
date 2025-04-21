@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.parser import process_document_dynamic_init # Import the dynamic init function
 from app.core.config import settings # Import settings to get models path
-from app.models.types import ParseRequest, OpenContractDocExport
+from app.models.types import OpenContractDocExport
 
 # Configure logging
 logging.basicConfig(

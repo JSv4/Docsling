@@ -12,7 +12,6 @@ beam-client
 pydantic-settings>=2.0.0,<3.0.0 # For loading settings from env/dotenv
 # flake8
 # black
-# mypy
+# mypy 
 
-# Add the tools package
-docling-tools 
+requests

@@ -54,6 +54,3 @@ build/
 *.egg-info
 
 # Add other files/directories you don't want in the image 
-submit_to_beam.py
-submit_to_beam_serve.py
-

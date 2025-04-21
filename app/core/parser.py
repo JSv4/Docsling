@@ -18,7 +18,6 @@ from docling_core.types.doc import (
     DoclingDocument,
     SectionHeaderItem,
     TextItem,
-    BoundingBox as DoclingBBox, # Explicitly import Docling's BBox
     PageItem as DoclingPage, # Explicitly import Docling's Page
 )
 from docling_core.transforms.chunker.hierarchical_chunker import HierarchicalChunker
@@ -26,7 +25,6 @@ from shapely.geometry import box
 from shapely.strtree import STRtree
 
 # Import from our microservice structure
-from app.core.config import settings
 from app.models.types import (
     OpenContractDocExport,
     OpenContractsAnnotationPythonType,
@@ -34,16 +32,14 @@ from app.models.types import (
     OpenContractsSinglePageAnnotationType,
     PawlsPagePythonType,
     PawlsTokenPythonType,
-    PawlsPageInfo,
-    Point,
-    Bounds,
+    PawlsPageInfo
 )
 from app.utils.files import check_if_pdf_needs_ocr
 from app.utils.layout import reassign_annotation_hierarchy
 
 # Import necessary Docling components based on the new documentation
 from docling.datamodel.base_models import InputFormat, DocumentStream
-from docling.datamodel.pipeline_options import PdfPipelineOptions # Key import
+from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.datamodel.document import ConversionResult
 
 logger = logging.getLogger(__name__)

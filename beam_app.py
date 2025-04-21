@@ -3,7 +3,7 @@ import base64
 import io
 import os
 import logging
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any
 
 # --- Configuration ---
 # Adjust resource requirements as needed. PDF processing can be intensive.
@@ -11,7 +11,7 @@ APP_NAME = "docling-parser"
 CPU_COUNT = 4
 MEMORY_SIZE = "16Gi"
 GPU = "T4" # Add if using GPU-accelerated models, otherwise omit
-PYTHON_VERSION = "python3.10" # Match your project's Python version
+# PYTHON_VERSION = "python3.10" # Python version now defined by Dockerfile's base image
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -23,59 +23,50 @@ logger = logging.getLogger(__name__)
 
 # --- Define Model Path ---
 # Define the target path inside the container (matches ENV var in Dockerfile)
-MODELS_TARGET_PATH = "/app/docling_models"
+MODELS_TARGET_PATH = "/app/docling_models" # Ensure this path is accessible/writable
 
-# --- Define Beam Image ---
-# Replicate dependencies from requirements.txt and Dockerfile system installs
+# --- Define Beam Image using Dockerfile ---
+# Assumes your Dockerfile is in the same directory as beam_app.py
+# and your project context root is where you run `beam deploy`
 image = (
-    beam.Image(
-        python_version=PYTHON_VERSION,
-        python_packages=[
-            "fastapi", # Keep if models depend on it, otherwise optional
-            "uvicorn[standard]", # Optional for beam app
-            "pydantic>=2.0.0,<3.0.0", # Ensure version compatibility
-            "pydantic-settings>=2.0.0,<3.0.0", # For loading settings
-            # Docling dependencies
-            "docling",
-            "docling-core",
-            # Other parser dependencies
-            "numpy",
-            "pdf2image",
-            "pytesseract", # Corrected name from requirements.txt
-            "pdfplumber",
-            "shapely",
-            "easyocr", # Ensure easyocr is listed
-            # Add any other specific versions if needed
-        ],
-        # Keep commands for pip upgrade and model download
-        commands=[
-            "pip install --upgrade pip",
-            # --- Download Models using Python Script ---
-            f"python /app/scripts/download_models.py --path {MODELS_TARGET_PATH}", # Add --force if needed
-        ],
+    beam.Image()
+    .from_dockerfile(
+        path="./Dockerfile", # Path relative to the context root
+        context_dir="."
     )
-    # Chain apt package installation using add_commands
-    .add_commands([
-        "apt-get update",
-        # Combine install commands, use --no-install-recommends, add -y
-        "apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng poppler-utils",
-        # Clean up apt cache
-        "rm -rf /var/lib/apt/lists/*"
-    ])
+    # Add Python packages NOT installed in the Dockerfile, if any.
+    # If requirements.txt is handled in Dockerfile, this might be empty or minimal.
+    # .add_python_packages([
+    #     "some-beam-specific-package",
+    # ])
+
+    # Keep the model download command here. It runs AFTER the Dockerfile build.
+    # *** IMPORTANT: Ensure this path matches the COPY destination in your Dockerfile ***
+    # .add_commands([
+    #     "pip install --upgrade pip", # Good practice
+    #     # Assuming Dockerfile copies scripts to /app/scripts
+    #     f"python /app/scripts/download_models.py --path {MODELS_TARGET_PATH}",
+    # ])
+    # --- Optionally keep pip upgrade or leave add_commands empty if nothing else needed ---
+     .add_commands([
+         "pip install --upgrade pip", # Still good practice
+     ]) # Or just remove .add_commands(...) entirely if pip upgrade is also in Dockerfile
+
+    # System dependencies (apt-get) should now be handled within the Dockerfile's RUN commands.
+    # .add_commands([ ... apt-get install ... ]) # REMOVE this section if handled by Dockerfile
 )
 
 # --- Loader Function ---
-def load_parser_components() -> Optional[Any]: # Return type depends on what you load
+def load_parser_components() -> Optional[Any]:
     """
     Loads and initializes the Docling DocumentConverter once when the container starts.
     """
     logger.info("Executing on_start loader: Initializing DocumentConverter...")
     try:
         # Import necessary components here, within the loader's execution context
-        from docling_core.converter.document_converter import DocumentConverter
-        from docling_core.converter.option import InputFormat, PdfFormatOption
-        from docling_core.pipeline.pdf.pdf_pipeline_options import PdfPipelineOptions
-        from docling_core.pipeline.ocr.easyocr.easyocr_options import EasyOcrOptions
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling.datamodel.base_models import InputFormat
+        from docling.datamodel.pipeline_options import PdfPipelineOptions, EasyOcrOptions
 
         # Ensure the model path exists (should have been created by download script)
         if not os.path.isdir(MODELS_TARGET_PATH):
@@ -119,12 +110,13 @@ def load_parser_components() -> Optional[Any]: # Return type depends on what you
     cpu=CPU_COUNT,
     memory=MEMORY_SIZE,
     gpu=GPU, # Uncomment if GPU is needed
-    image=image,
+    image=image, # Use the image defined above
     keep_warm_seconds=60, # Keep warm for 60 seconds
     on_start=load_parser_components, # Add the loader function here
+    timeout=600,
     # volumes=[...] # Keep Volume option commented out unless needed
 )
-def parse_pdf_beam(context: beam.Context, **inputs: Dict[str, Any]) -> Dict[str, Any]: # Add context
+def parse_pdf_beam(context, **inputs: Dict[str, Any]) -> Dict[str, Any]: # Add context
     """
     Beam endpoint to parse a PDF document using Docling.
     Uses a pre-loaded DocumentConverter from the on_start loader.

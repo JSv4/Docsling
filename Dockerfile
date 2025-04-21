@@ -25,8 +25,9 @@
 # ==============================================================================
 
 # --- Stage 1: Base ---
-# Sets up Python, common OS dependencies, and working directory.
-FROM python:3.10-slim AS base
+# Use official PyTorch image with CUDA 12.4 / cuDNN 9
+# Use the fully qualified name for compatibility with Beam's build system
+FROM docker.io/pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime AS base
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE 1
@@ -35,54 +36,57 @@ ENV LANG C.UTF-8
 ENV LC_ALL C.UTF-8
 # Path for models inside the container (used by download script and app)
 ENV DOCLING_MODELS_PATH=/app/docling_models
+# Add Python's user site-packages bin to PATH
+# Assuming the default python3 in the image is 3.11
+ENV PATH="/root/.local/bin:${PATH}"
+# Explicitly tell Python where to find packages installed with --user
+# --- ADJUST PYTHON VERSION IN PATH ---
+ENV PYTHONPATH="/root/.local/lib/python3.11/site-packages:${PYTHONPATH:-}"
 
-# Install common system dependencies
+# Install essential tools, pip, and required system dependencies
+# --- REMOVE python3.10 INSTALLATION ---
+# The PyTorch image provides Python (likely 3.11). Ensure pip and venv tools are present.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-pip \
+    python3-venv \
     tesseract-ocr \
     poppler-utils \
-    # Add any other common system dependencies here
-    && rm -rf /var/lib/apt/lists/*
+    # Add any other common system dependencies here (e.g., git, curl if needed)
+    && rm -rf /var/lib/apt/lists/* \
+    # Ensure pip is upgraded for the default python3
+    && python3 -m pip install --upgrade pip
 
 # Set work directory
 WORKDIR /app
 
 # --- Stage 2: Builder ---
-# Installs all dependencies (dev + prod), downloads models, copies code.
-# Used for development and running tests in container.
+# Installs remaining dependencies, downloads models, copies code.
 FROM base AS builder
 
-# Install build-time OS dependencies (if any are needed only for build/download)
-# RUN apt-get update && apt-get install -y --no-install-recommends wget tar && rm -rf /var/lib/apt/lists/*
+# Copy requirements file
+COPY requirements.txt ./
 
-# Copy requirements files
-COPY requirements.txt requirements-dev.txt ./
-
-# Install all Python dependencies (including dev)
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements-dev.txt
+# Install remaining Python dependencies from requirements.txt using the default python3
+# Pip should detect the pre-installed torch and skip it if versions match.
+RUN python3 -m pip install --no-cache-dir --user -r requirements.txt # Removed --upgrade pip here as it's done in base
 
 # Copy the model download script
 COPY ./scripts/download_models.py /app/scripts/download_models.py
 
 # Download models
-# This layer is cached if the script doesn't change. Add --force if needed.
-RUN python /app/scripts/download_models.py --path "${DOCLING_MODELS_PATH}"
+RUN python3 /app/scripts/download_models.py --path "${DOCLING_MODELS_PATH}"
 
 # Copy application and test code
-# Copy app code after installing dependencies and downloading models to leverage cache
 COPY ./app /app/app
-COPY ./tests /app/tests
+# COPY ./tests /app/tests # Optional: only needed if running tests in builder <-- REMOVE OR COMMENT OUT
 
 # --- Stage 3: Production ---
 # Creates the final lean production image.
+# Inherits PyTorch, Python 3.11, Tesseract, Poppler from the 'base' stage.
 FROM base AS production
 
-# Copy only production requirements file
-COPY requirements.txt ./
-
-# Install only production Python dependencies
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+# Copy installed Python packages (excluding torch, already in base) from the builder stage
+COPY --from=builder /root/.local /root/.local
 
 # Copy downloaded models from the builder stage
 COPY --from=builder ${DOCLING_MODELS_PATH} ${DOCLING_MODELS_PATH}
@@ -93,7 +97,5 @@ COPY --from=builder /app/app /app/app
 # Expose the port the app runs on
 EXPOSE 8000
 
-# Define the command to run the production application
-# Consider using gunicorn for more robust process management in production
-# CMD ["gunicorn", "-k", "uvicorn.workers.UvicornWorker", "-w", "4", "-b", "0.0.0.0:8000", "app.main:app"]
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"] 
+# Define the command to run the production application using the default python3
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"] 
