@@ -40,50 +40,9 @@ from app.utils.layout import reassign_annotation_hierarchy
 # Import necessary Docling components based on the new documentation
 from docling.datamodel.base_models import InputFormat, DocumentStream
 from docling.datamodel.pipeline_options import PdfPipelineOptions
-from docling.datamodel.document import ConversionResult
 
 logger = logging.getLogger(__name__)
-# Configure basic logging if running standalone, Uvicorn might override this
-# logging.basicConfig(level=logging.INFO)
-
-# --- Global variable for pre-loaded converter (optional, for optimization) ---
-# Keep this pattern if desired, but initialization needs adjustment
-_global_doc_converter: Optional[DocumentConverter] = None
-
-def _initialize_converter(models_path: str) -> DocumentConverter:
-    """Initializes the DocumentConverter with the specified models path."""
-    logger.info(f"Initializing DocumentConverter with artifacts_path: {models_path}")
-    try:
-        # --- NEW INITIALIZATION METHOD ---
-        # Create pipeline options specifying the artifacts path
-        pipeline_options = PdfPipelineOptions(artifacts_path=models_path)
-
-        # Configure the DocumentConverter with these options for PDF format
-        doc_converter = DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
-            }
-        )
-        # --- END NEW INITIALIZATION METHOD ---
-
-        logger.info("DocumentConverter initialized successfully.")
-        return doc_converter
-    except Exception as e:
-        logger.exception(f"Failed to initialize DocumentConverter: {e}")
-        raise RuntimeError(f"Could not initialize DocumentConverter. Check models path ('{models_path}') and dependencies.") from e
-
-def get_global_converter(models_path: str) -> DocumentConverter:
-    """Gets or initializes the global DocumentConverter instance."""
-    global _global_doc_converter
-    if _global_doc_converter is None:
-        logger.info("Global DocumentConverter not found, initializing...")
-        _global_doc_converter = _initialize_converter(models_path)
-    else:
-        # Optional: Add check if models_path has changed, though unlikely in prod
-        logger.debug("Using pre-initialized global DocumentConverter.")
-    return _global_doc_converter
-
-# --- Helper Functions ---
+logging.basicConfig(level=logging.INFO)
 
 def build_text_lookup(docling_document: DoclingDocument) -> Dict[str, str]:
     """
@@ -690,11 +649,9 @@ def _generate_pawls_content(
         full_content,
     )
 
-# --- Original process_document function (slightly modified) ---
-# Rename or keep as is, but ensure it doesn't rely on the global 'doc_converter'
-
-def _internal_process_document(
-    doc_converter: DocumentConverter, # Accept converter as argument
+# --- New function to perform processing with a pre-loaded converter ---
+def process_document_with_converter(
+    doc_converter: DocumentConverter, # Accept pre-initialized converter
     pdf_bytes: bytes,
     pdf_filename: str,
     force_ocr: bool = False,
@@ -702,277 +659,13 @@ def _internal_process_document(
     llm_enhanced_hierarchy: bool = False,
 ) -> Optional[OpenContractDocExport]:
     """
-    Internal processing logic using a provided DocumentConverter instance.
-
-    (Keep the entire logic from the original process_document function here,
-     but remove any direct reference to the global 'doc_converter'. It now
-     uses the one passed as an argument.)
-
-    Args:
-        doc_converter: An initialized DocumentConverter instance.
-        pdf_bytes: The content of the PDF file.
-        pdf_filename: Original filename.
-        force_ocr: If True, forces OCR.
-        roll_up_groups: If True, groups items under headings.
-        llm_enhanced_hierarchy: If True, attempts LLM hierarchy (Placeholder).
-
-    Returns:
-        An OpenContractDocExport object or None if processing fails.
-    """
-    logger.info(f"Processing document: {pdf_filename} using provided converter")
-    logger.info(f"Options: force_ocr={force_ocr}, roll_up_groups={roll_up_groups}, llm_enhanced_hierarchy={llm_enhanced_hierarchy}")
-
-    try:
-        buf = BytesIO(pdf_bytes)
-        doc_stream = DocumentStream(name=pdf_filename, stream=buf)
-
-        # Convert file via Docling using the provided converter
-        result = doc_converter.convert(doc_stream)
-        if result.status != ConversionStatus.SUCCESS or not result.document:
-            logger.error(f"Docling conversion failed for {pdf_filename}. Status: {result.status}. Errors: {result.errors}")
-            # Consider returning specific error info if needed by the client
-            return None
-
-        doc: DoclingDocument = cast(DoclingDocument, result.document)
-        logger.info(f"Docling conversion successful for {pdf_filename}. Found {len(doc.pages)} pages, {len(doc.texts)} text items.")
-
-        # --- 2. Generate PAWLS Content & Spatial Indices ---
-        # This step uses either pdfplumber or OCR based on checks/options
-        (
-            pawls_pages,
-            spatial_indices_by_page,
-            tokens_by_page,
-            token_indices_by_page, # Map STRtree index -> original token index
-            page_dimensions,
-            content, # Full text content from extraction
-        ) = _generate_pawls_content(doc, pdf_bytes, force_ocr)
-
-        if not pawls_pages:
-             logger.error(f"PAWLS content generation failed to produce any pages for {pdf_filename}.")
-             return None # Cannot proceed without token/page data
-
-        # --- 3. Run Hierarchical Chunker ---
-        logger.debug(f"Running HierarchicalChunker on Docling document...")
-        # Ensure HierarchicalChunker is thread-safe if used globally or instantiate here
-        chunker = HierarchicalChunker()
-        # chunk() returns a generator, convert to list
-        chunks = list(chunker.chunk(dl_doc=doc))
-        logger.info(f"Generated {len(chunks)} chunks using HierarchicalChunker.")
-
-        # --- 4. Build Base Annotations ---
-        logger.debug(f"Converting Docling items to base annotations...")
-        base_annotation_lookup: Dict[str, OpenContractsAnnotationPythonType] = {}
-        # Build lookup for finding heading refs later
-        text_to_ref_lookup = build_text_lookup(doc)
-
-        valid_annotations_count = 0
-        conversion_failures = 0
-        for item in doc.texts + doc.list_items: # Process both text and list items
-            # Ensure item has necessary attributes before passing
-            if hasattr(item, "prov") and hasattr(item, "label") and hasattr(item, "self_ref"):
-                annotation = convert_docling_item_to_annotation(
-                    item, # type: ignore # Pass TextItem or ListItem
-                    spatial_indices_by_page,
-                    tokens_by_page,
-                    token_indices_by_page,
-                    page_dimensions,
-                )
-                if annotation and annotation.id: # Ensure annotation and its ID are valid
-                    # Check for duplicate IDs, although self_ref should be unique
-                    if annotation.id in base_annotation_lookup:
-                         logger.warning(f"Duplicate annotation ID found: {annotation.id}. Overwriting.")
-                    base_annotation_lookup[annotation.id] = annotation
-                    valid_annotations_count += 1
-                elif getattr(item, 'self_ref', None):
-                     # Log if conversion failed for an item that had an ID
-                     logger.warning(f"Could not convert item with ref {item.self_ref} to annotation.")
-                     conversion_failures += 1
-            else:
-                 logger.debug(f"Skipping item due to missing attributes (prov, label, or self_ref): {type(item)}")
-                 conversion_failures += 1
-
-
-        logger.info(f"Generated {valid_annotations_count} base annotations ({conversion_failures} conversion failures).")
-        if not base_annotation_lookup:
-             logger.error(f"No base annotations could be generated for {pdf_filename}. Cannot proceed.")
-             return None
-
-        # --- 5. Apply Hierarchy and Collect Relationships ---
-        logger.debug(f"Applying hierarchy based on chunks (roll_up_groups={roll_up_groups})...")
-        # Structure for rolled-up groups: {heading_id: [child_id1, child_id2,...]}
-        flattened_heading_annot_id_to_children: Dict[str, List[str]] = {}
-        # Structure for non-rolled-up groups: [(heading_id1, [child_id1,...]), (heading_id1, [child_id5,...]), ...]
-        # Allows multiple relationship groups per heading if chunker splits them
-        heading_annot_id_to_chunk_children: List[Tuple[str, List[str]]] = []
-
-        processed_item_refs = set() # Keep track of items assigned to a chunk/parent
-
-        for i, chunk in enumerate(chunks):
-            parent_ref: Optional[str] = None
-            heading_text: Optional[str] = None
-
-            # Identify the parent heading for this chunk
-            if chunk.meta.headings:
-                # Assuming the first heading is the primary one for the chunk
-                heading_text = chunk.meta.headings[0].strip()
-                parent_ref = text_to_ref_lookup.get(heading_text)
-
-                if not parent_ref:
-                     logger.warning(f"Chunk {i}: Could not find self_ref for heading text: '{heading_text}'. Chunk items will have no parent.")
-                # Ensure the identified heading exists as a valid annotation
-                elif parent_ref not in base_annotation_lookup:
-                     logger.warning(f"Chunk {i}: Heading text '{heading_text}' with ref '{parent_ref}' not found in base annotations. Cannot use as parent.")
-                     parent_ref = None # Treat as parentless chunk
-
-            # Prepare structures for relationship building
-            if parent_ref:
-                if roll_up_groups:
-                    # Ensure entry exists for this heading
-                    if parent_ref not in flattened_heading_annot_id_to_children:
-                        flattened_heading_annot_id_to_children[parent_ref] = []
-                else:
-                    # For non-rollup, add a new tuple representing this specific chunk's relationship to the parent
-                    # We will populate the child list in the next step
-                    heading_annot_id_to_chunk_children.append((parent_ref, []))
-
-
-            # Process items within the chunk and assign parent_id
-            current_chunk_children: List[str] = []
-            if hasattr(chunk.meta, "doc_items") and chunk.meta.doc_items:
-                for item in chunk.meta.doc_items:
-                    item_ref = getattr(item, 'self_ref', None)
-                    if not item_ref: continue
-
-                    annotation = base_annotation_lookup.get(item_ref)
-                    if annotation:
-                        # Assign parent_id if a valid parent_ref exists for this chunk
-                        # and the item is not the heading itself
-                        if parent_ref and parent_ref != annotation.id:
-                            # Check if already assigned a parent (can happen if item appears in multiple chunks?)
-                            if annotation.parent_id and annotation.parent_id != parent_ref:
-                                 logger.warning(f"Annotation {annotation.id} ('{annotation.rawText[:20]}...') found in chunk {i} under parent {parent_ref}, but already has parent {annotation.parent_id}. Overwriting parent.")
-                            annotation.parent_id = parent_ref
-                            current_chunk_children.append(annotation.id)
-                            processed_item_refs.add(annotation.id)
-                        # else: # Item has no parent for this chunk (either no heading or item is the heading)
-                            # logger.debug(f"Item {annotation.id} in chunk {i} has no parent assigned.")
-                            # pass # Keep parent_id as None
-
-                    # else: # Annotation might be missing if conversion failed earlier
-                       # logger.debug(f"Annotation not found for item ref {item_ref} in chunk {i}")
-
-            # Add the collected children to the appropriate relationship structure
-            if parent_ref and current_chunk_children:
-                if roll_up_groups:
-                     flattened_heading_annot_id_to_children[parent_ref].extend(current_chunk_children)
-                else:
-                     # Add children to the *last* tuple added for this parent_ref
-                     # This assumes the list `heading_annot_id_to_chunk_children` maintains chunk order
-                     if heading_annot_id_to_chunk_children and heading_annot_id_to_chunk_children[-1][0] == parent_ref:
-                          heading_annot_id_to_chunk_children[-1][1].extend(current_chunk_children)
-                     else:
-                          # This case should ideally not happen if a tuple was added above when parent_ref was found
-                          logger.error(f"Logic error: Could not find matching tuple for parent_ref {parent_ref} in non-rollup list for chunk {i}.")
-
-
-        # --- 6. Build Relationships ---
-        logger.debug("Building relationship objects...")
-        relationships: List[OpenContractsRelationshipPythonType] = []
-        rel_counter = 0
-        if roll_up_groups:
-            for heading_id, child_ids in flattened_heading_annot_id_to_children.items():
-                # Only create relationship if there are children and the heading exists
-                if child_ids and heading_id in base_annotation_lookup:
-                    relationships.append(OpenContractsRelationshipPythonType(
-                        id=f"group-rel-{rel_counter}",
-                        relationshipLabel="Docling Group Relationship", # Rolled-up relationship
-                        source_annotation_ids=[heading_id],
-                        target_annotation_ids=child_ids,
-                        structural=True,
-                    ))
-                    rel_counter += 1
-                elif not child_ids:
-                     logger.debug(f"Skipping relationship for heading {heading_id}: No children found in roll-up.")
-                elif heading_id not in base_annotation_lookup:
-                     logger.warning(f"Skipping relationship for heading {heading_id}: Heading annotation not found.")
-
-        else: # Non-rolled-up relationships (one per chunk under a heading)
-            for heading_id, child_ids in heading_annot_id_to_chunk_children:
-                 # Only create relationship if there are children and the heading exists
-                if child_ids and heading_id in base_annotation_lookup:
-                    relationships.append(OpenContractsRelationshipPythonType(
-                        id=f"group-rel-{rel_counter}",
-                        relationshipLabel="Docling Chunk Relationship", # Relationship per chunk
-                        source_annotation_ids=[heading_id],
-                        target_annotation_ids=child_ids,
-                        structural=True,
-                    ))
-                    rel_counter += 1
-                elif not child_ids:
-                     logger.debug(f"Skipping relationship for heading {heading_id} (chunk instance): No children found.")
-                elif heading_id not in base_annotation_lookup:
-                     logger.warning(f"Skipping relationship for heading {heading_id} (chunk instance): Heading annotation not found.")
-
-
-        logger.info(f"Generated {len(relationships)} relationships.")
-
-        # --- 7. Final Output Assembly ---
-        # Get all annotations from the lookup
-        final_annotations = list(base_annotation_lookup.values())
-
-        # Optional LLM Enhancement Step
-        if llm_enhanced_hierarchy:
-            logger.info("Applying LLM-enhanced hierarchy (Placeholder)...")
-            # This function currently just returns the input
-            final_annotations = reassign_annotation_hierarchy(final_annotations)
-
-        # Extract metadata
-        default_title = Path(pdf_filename).stem # Use filename stem as default
-        title = _extract_title(doc, default_title)
-        description = _extract_description(doc, title)
-
-        # Construct the final export object using Pydantic model
-        open_contracts_data = OpenContractDocExport(
-            title=title,
-            content=content, # Use the text extracted during PAWLS generation
-            description=description,
-            pawlsFileContent=pawls_pages, # Use alias
-            pageCount=len(pawls_pages), # Use alias
-            docLabels=[], # Add logic if doc labels are needed/extracted
-            labelledText=final_annotations, # Use alias
-            relationships=relationships,
-        )
-
-        logger.info(f"Successfully processed {pdf_filename} via internal function.")
-        return open_contracts_data
-
-    except RuntimeError as dep_error:
-         logger.error(f"Processing failed for {pdf_filename} (internal): {dep_error}", exc_info=True)
-         return None
-    except Exception as e:
-        stacktrace = traceback.format_exc()
-        logger.error(f"Unexpected error during internal processing for {pdf_filename}: {e}\n{stacktrace}")
-        return None
-
-
-# --- New Wrapper Function for Dynamic Initialization ---
-
-def process_document_dynamic_init(
-    pdf_bytes: bytes,
-    pdf_filename: str,
-    models_path: str,
-    force_ocr: bool = False,
-    roll_up_groups: bool = False,
-    llm_enhanced_hierarchy: bool = False,
-) -> Optional[OpenContractDocExport]:
-    """
-    Processes a PDF document using a dynamically initialized DocumentConverter,
+    Processes a PDF document using a provided DocumentConverter instance,
     extracts metadata, annotations, and relationships.
 
     Args:
+        doc_converter: An initialized DocumentConverter instance.
         pdf_bytes: The raw bytes of the PDF file.
         pdf_filename: The original filename (for logging/metadata).
-        models_path: Path to the directory containing downloaded Docling models.
         force_ocr: Flag to force OCR even if text layer exists.
         roll_up_groups: Flag to enable roll-up groups feature for relationships.
         llm_enhanced_hierarchy: Flag for LLM enhanced hierarchy processing.
@@ -980,39 +673,10 @@ def process_document_dynamic_init(
     Returns:
         An OpenContractDocExport object if successful, None otherwise.
     """
-    logger.info(f"Starting dynamic processing for {pdf_filename}...")
+    logger.info(f"Starting processing for {pdf_filename} with pre-loaded converter.")
     logger.info(f"Options: force_ocr={force_ocr}, roll_up_groups={roll_up_groups}, llm_enhanced_hierarchy={llm_enhanced_hierarchy}")
 
-    # --- 1. Initialize DocumentConverter (Dynamically) ---
-    try:
-        if not os.path.exists(models_path):
-            logger.error(f"Docling models path '{models_path}' does not exist.")
-            return None
-
-        # Configure Docling options
-        ocr_options = EasyOcrOptions(
-            model_storage_directory=models_path,
-            # Add other OCR options if needed, e.g., gpu=True if supported/desired
-        )
-        pipeline_options = PdfPipelineOptions(
-            artifacts_path=models_path,
-            do_ocr=True, # Let Docling decide based on its internal logic unless overridden? Or rely on our force_ocr?
-                       # Setting True ensures OCR models are loaded if needed.
-                       # The _generate_pawls_content function will ultimately decide based on check_if_pdf_needs_ocr or force_ocr.
-            do_table_structure=True, # Keep table structure extraction enabled
-            generate_page_images=True, # Needed for OCR path in _generate_pawls_content
-            ocr_options=ocr_options,
-            # Add other pipeline options if needed
-        )
-        doc_converter = DocumentConverter(
-            format_options={
-                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
-            }
-        )
-        logger.info("DocumentConverter initialized dynamically.")
-    except Exception as e:
-        logger.error(f"Failed to initialize DocumentConverter: {e}", exc_info=True)
-        return None
+    # --- Steps from original process_document_dynamic_init, starting from Docling conversion ---
 
     # --- 2. Convert PDF using Docling ---
     doc_stream = DocumentStream(name=pdf_filename, stream=BytesIO(pdf_bytes))
@@ -1238,13 +902,7 @@ def process_document_dynamic_init(
     if llm_enhanced_hierarchy:
         logger.info("Applying LLM-enhanced hierarchy (experimental)...")
         try:
-            # Ensure the function handles the current annotation format
-            # Note: This function might modify parent_ids, potentially conflicting
-            # with the relationships just built. Careful coordination is needed.
-            # It might be better to run this *before* building relationships
-            # if it primarily adjusts parent_ids.
-            # Or, the relationship building needs to re-run based on new parent_ids.
-            # For now, applying it after relationship building based on original code placement.
+            # This function might modify parent_ids in final_annotations
             enriched_annotations = reassign_annotation_hierarchy(final_annotations)
             if enriched_annotations:
                  final_annotations = enriched_annotations
@@ -1270,9 +928,70 @@ def process_document_dynamic_init(
     logger.info(f"Successfully processed {pdf_filename}. Returning OpenContractDocExport.")
     return OpenContractDocExport(**export_data)
 
-# ... rest of the file (DoclingParser class, etc.) ...
+# --- Wrapper Function for Dynamic Initialization ---
+def process_document_dynamic_init(
+    pdf_bytes: bytes,
+    pdf_filename: str,
+    models_path: str,
+    force_ocr: bool = False,
+    roll_up_groups: bool = False,
+    llm_enhanced_hierarchy: bool = False,
+) -> Optional[OpenContractDocExport]:
+    """
+    Processes a PDF document using a dynamically initialized DocumentConverter,
+    extracts metadata, annotations, and relationships.
 
-# Make sure helper functions like _generate_pawls_content, _extract_title,
-# _extract_description, convert_docling_item_to_annotation, build_text_lookup
-# are defined within or imported into this file scope.
-# Also ensure reassign_annotation_hierarchy is available if llm_enhanced_hierarchy is used.
+    Args:
+        pdf_bytes: The raw bytes of the PDF file.
+        pdf_filename: The original filename (for logging/metadata).
+        models_path: Path to the directory containing downloaded Docling models.
+        force_ocr: Flag to force OCR even if text layer exists.
+        roll_up_groups: Flag to enable roll-up groups feature for relationships.
+        llm_enhanced_hierarchy: Flag for LLM enhanced hierarchy processing.
+
+    Returns:
+        An OpenContractDocExport object if successful, None otherwise.
+    """
+    logger.info(f"Starting dynamic processing for {pdf_filename}...")
+    logger.info(f"Options: force_ocr={force_ocr}, roll_up_groups={roll_up_groups}, llm_enhanced_hierarchy={llm_enhanced_hierarchy}")
+
+    # --- 1. Initialize DocumentConverter (Dynamically) ---
+    try:
+        if not os.path.exists(models_path):
+            logger.error(f"Docling models path '{models_path}' does not exist.")
+            return None
+
+        # Configure Docling options
+        ocr_options = EasyOcrOptions(
+            model_storage_directory=models_path,
+            # Add other OCR options if needed, e.g., gpu=True if supported/desired
+        )
+        pipeline_options = PdfPipelineOptions(
+            artifacts_path=models_path,
+            do_ocr=True, # Let Docling decide based on its internal logic unless overridden? Or rely on our force_ocr?
+                       # Setting True ensures OCR models are loaded if needed.
+                       # The _generate_pawls_content function will ultimately decide based on check_if_pdf_needs_ocr or force_ocr.
+            do_table_structure=True, # Keep table structure extraction enabled
+            generate_page_images=True, # Needed for OCR path in _generate_pawls_content
+            ocr_options=ocr_options,
+            # Add other pipeline options if needed
+        )
+        doc_converter = DocumentConverter(
+            format_options={
+                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
+            }
+        )
+        logger.info("DocumentConverter initialized dynamically.")
+    except Exception as e:
+        logger.error(f"Failed to initialize DocumentConverter: {e}", exc_info=True)
+        return None
+
+    # --- function that handles the rest of the processing ---
+    return process_document_with_converter(
+        doc_converter=doc_converter,
+        pdf_bytes=pdf_bytes,
+        pdf_filename=pdf_filename,
+        force_ocr=force_ocr,
+        roll_up_groups=roll_up_groups,
+        llm_enhanced_hierarchy=llm_enhanced_hierarchy,
+    )

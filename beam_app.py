@@ -26,34 +26,13 @@ logger = logging.getLogger(__name__)
 MODELS_TARGET_PATH = "/app/docling_models" # Ensure this path is accessible/writable
 
 # --- Define Beam Image using Dockerfile ---
-# Assumes your Dockerfile is in the same directory as beam_app.py
-# and your project context root is where you run `beam deploy`
 image = (
     beam.Image()
     .from_dockerfile(
         path="./Dockerfile", # Path relative to the context root
         context_dir="."
     )
-    # Add Python packages NOT installed in the Dockerfile, if any.
-    # If requirements.txt is handled in Dockerfile, this might be empty or minimal.
-    # .add_python_packages([
-    #     "some-beam-specific-package",
-    # ])
-
-    # Keep the model download command here. It runs AFTER the Dockerfile build.
-    # *** IMPORTANT: Ensure this path matches the COPY destination in your Dockerfile ***
-    # .add_commands([
-    #     "pip install --upgrade pip", # Good practice
-    #     # Assuming Dockerfile copies scripts to /app/scripts
-    #     f"python /app/scripts/download_models.py --path {MODELS_TARGET_PATH}",
-    # ])
-    # --- Optionally keep pip upgrade or leave add_commands empty if nothing else needed ---
-     .add_commands([
-         "pip install --upgrade pip", # Still good practice
-     ]) # Or just remove .add_commands(...) entirely if pip upgrade is also in Dockerfile
-
-    # System dependencies (apt-get) should now be handled within the Dockerfile's RUN commands.
-    # .add_commands([ ... apt-get install ... ]) # REMOVE this section if handled by Dockerfile
+    .add_python_packages(packages="requirements.txt")
 )
 
 # --- Loader Function ---
@@ -74,11 +53,10 @@ def load_parser_components() -> Optional[Any]:
              # Raise an error to potentially prevent the endpoint from starting incorrectly
              raise FileNotFoundError(f"Model directory not found: {MODELS_TARGET_PATH}")
 
-        # Configure OCR options (if needed, mirror from parser.py or simplify)
-        # Ensure languages here match those downloaded by scripts/download_models.py
+        # Configure OCR options
         ocr_options = EasyOcrOptions(
             model_storage_directory=MODELS_TARGET_PATH,
-            lang_list=['en'] # Ensure this matches languages downloaded
+            lang=['en'] # Ensure this matches languages downloaded
         )
 
         # Configure pipeline options
@@ -101,8 +79,24 @@ def load_parser_components() -> Optional[Any]:
         return doc_converter
     except Exception as e:
         logger.exception("Failed to initialize DocumentConverter during on_start.")
-        # Return None or raise error depending on desired behavior if loading fails
-        return None # Or raise e
+        # Get detailed traceback information
+        import traceback
+        import sys
+        exc_type, exc_value, exc_traceback = sys.exc_info()
+        detailed_traceback = traceback.format_exception(exc_type, exc_value, exc_traceback)
+        logger.error(f"Detailed traceback:\n{''.join(detailed_traceback)}")
+        
+        # Log additional context
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Error message: {str(e)}")
+        logger.error(f"Current working directory: {os.getcwd()}")
+        logger.error(f"Models path: {MODELS_TARGET_PATH}")
+        logger.error(f"Directory exists: {os.path.exists(MODELS_TARGET_PATH)}")
+        logger.error(f"Directory is directory: {os.path.isdir(MODELS_TARGET_PATH)}")
+        logger.error(f"Directory permissions: {oct(os.stat(MODELS_TARGET_PATH).st_mode)[-3:]}")
+        
+        # Return None to allow the endpoint to start, but log extensively
+        return None
 
 # --- Beam Endpoint Definition ---
 @beam.endpoint(
@@ -146,7 +140,7 @@ def parse_pdf_beam(context, **inputs: Dict[str, Any]) -> Dict[str, Any]: # Add c
     # --- Import necessary functions inside the endpoint ---
     try:
         # We only need the internal processing function and the output model now
-        from app.core.parser import _internal_process_document # Import the internal function
+        from app.core.parser import process_document_with_converter # MODIFIED: Import the new function
         from app.models.types import OpenContractDocExport
     except ImportError as e:
          logger.exception("Failed to import application modules within Beam endpoint.")
@@ -181,7 +175,7 @@ def parse_pdf_beam(context, **inputs: Dict[str, Any]) -> Dict[str, Any]: # Add c
     # Note: We now call the internal function directly with the pre-loaded converter
     try:
         logger.info(f"Processing document {filename} using pre-loaded converter.")
-        result_model: Optional[OpenContractDocExport] = _internal_process_document(
+        result_model: Optional[OpenContractDocExport] = process_document_with_converter( # MODIFIED: Call the new function
             doc_converter=doc_converter, # Pass the pre-loaded converter
             pdf_bytes=pdf_bytes,
             pdf_filename=filename,

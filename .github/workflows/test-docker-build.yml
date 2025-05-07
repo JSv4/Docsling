@@ -1,0 +1,28 @@
+name: Test Docker Build Locally
+
+on:
+  push:
+    branches: [ main ] # Or your default branch
+  pull_request:
+    branches: [ main ] # Or your default branch
+
+jobs:
+  build_and_test_docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11' # Match Python version if critical, or use a common one
+
+      - name: Install script dependencies
+        run: pip install requests
+
+      - name: Make test script executable
+        run: chmod +x ./test_docker_locally.py
+
+      - name: Run local Docker test script
+        run: ./test_docker_locally.py 

@@ -15,3 +15,6 @@ pydantic-settings>=2.0.0,<3.0.0 # For loading settings from env/dotenv
 # mypy 
 
 requests
+
+# Utilities
+python-dotenv

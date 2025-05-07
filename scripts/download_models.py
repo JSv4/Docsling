@@ -5,13 +5,11 @@ from pathlib import Path
 import sys # Import sys for exit
 from typing import Optional
 
-# Ensure necessary libraries are imported
 try:
     import easyocr
     # Import the new recommended download utility
     from docling.utils.model_downloader import download_models as download_docling_core_models
-    # Import huggingface_hub to check login status potentially
-    from huggingface_hub import HfFolder, __version__ as hf_hub_version
+    from huggingface_hub import HfFolder
 except ImportError as e:
     print(f"Error importing necessary libraries: {e}")
     print("Please ensure docling-core, easyocr, and huggingface-hub are installed.")
@@ -65,7 +63,6 @@ def download_all_models(
 
     # --- Download Core Docling Models ---
     logger.info("Attempting to download core Docling models (layout, tableformer, etc.)...")
-    core_models_downloaded = False
     try:
         # Set DOCLING_ARTIFACTS_PATH environment variable BEFORE calling download
         logger.info(f"Setting DOCLING_ARTIFACTS_PATH environment variable to: {resolved_base_path}")
@@ -79,7 +76,6 @@ def download_all_models(
         # Optional: Verify a key file exists within the resolved_path
         # Example: layout_model_path = target_path / "layout" / "model.safetensors" # Adjust if needed
         # if layout_model_path.exists(): logger.info("Verified layout model component.")
-        core_models_downloaded = True
 
     except ImportError:
          logger.error("Failed to import docling.utils.model_downloader. Is docling-core installed and up-to-date?")
@@ -99,7 +95,6 @@ def download_all_models(
         if hf_token and 'HUGGING_FACE_HUB_TOKEN' in os.environ: # Only delete if we set it
              del os.environ['HUGGING_FACE_HUB_TOKEN']
 
-
     # --- Download EasyOCR Models ---
     logger.info("Attempting to download EasyOCR models...")
     try:
@@ -108,14 +103,10 @@ def download_all_models(
         resolved_easyocr_path = str(easyocr_subdir.resolve())
         logger.info(f"EasyOCR models will be downloaded to: '{resolved_easyocr_path}'")
 
-        # --- KEY CHANGE: Use supported language codes ('en', 'fr') ---
-        # 'latin' is not a valid EasyOCR language code.
         # We need codes that trigger the download of the required model files
-        # (english_g2.pth and latin_g2.pth). 'en' covers English, and 'fr'
-        # (or 'es', 'de', etc.) should cover the latin_g2 model.
-        required_easyocr_langs = ['en', 'fr', 'la'] # Using 'fr' to trigger latin_g2.pth download
+        # 'en' covers English, and 'fr' (or 'es', 'de', etc.) should cover the latin_g2 model.
+        required_easyocr_langs = ['en', 'fr', 'la']
         logger.info(f"Downloading EasyOCR models for languages: {required_easyocr_langs}")
-        # --- END KEY CHANGE ---
 
         reader = easyocr.Reader(
             required_easyocr_langs, # Use the updated list
