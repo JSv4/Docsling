@@ -1,6 +1,5 @@
 import beam
 import base64
-import io
 import os
 import logging
 from typing import Optional, Dict, Any

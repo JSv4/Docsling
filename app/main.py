@@ -25,7 +25,7 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# Add CORS middleware
+# Add CORS middleware (for use in compose only)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Allows all origins
@@ -35,7 +35,6 @@ app.add_middleware(
 )
 
 # --- Error Handling ---
-
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
     """Handle unexpected exceptions."""
@@ -46,7 +45,6 @@ async def generic_exception_handler(request: Request, exc: Exception):
     )
 
 # --- Routes ---
-
 @app.get("/")
 async def root():
     """Root endpoint for health checks."""

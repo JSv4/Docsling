@@ -64,16 +64,11 @@ class OpenContractsAnnotationPythonType(BaseModel):
     id: Optional[str] = Field(None, description="Unique identifier for the annotation (e.g., Docling self_ref).")
     annotationLabel: str = Field(description="The label assigned to the annotation (e.g., 'Section Header', 'Paragraph').")
     rawText: str = Field(description="The full raw text of the annotation.")
-    page: int = Field(description="0-based index of the primary page where the annotation starts or is most relevant.") # Check if this definition is accurate for multi-page annotations
-    # Using alias for consistency with potential frontend expectations
-    annotation_json: Dict[int, OpenContractsSinglePageAnnotationType] = Field(alias="annotationJson", description="Mapping of 0-based page indices to page-specific annotation details.")
+    page: int = Field(description="0-based index of the primary page where the annotation starts or is most relevant.")
+    annotation_json: Dict[int, OpenContractsSinglePageAnnotationType] = Field(description="Mapping of 0-based page indices to page-specific annotation details.")
     parent_id: Optional[str] = Field(None, description="ID of the parent annotation in a hierarchy.")
     annotation_type: str = Field("TOKEN_LABEL", description="Type of annotation, defaults to 'TOKEN_LABEL'.")
     structural: bool = Field(True, description="Indicates if the annotation is structural (derived from layout).")
-
-    class Config:
-        allow_population_by_field_name = True # Allows using 'annotation_json' during model creation
-
 
 # --- OpenContracts Relationship Types ---
 

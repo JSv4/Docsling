@@ -41,6 +41,9 @@ from app.utils.layout import reassign_annotation_hierarchy
 from docling.datamodel.base_models import InputFormat, DocumentStream
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 
+from pydantic import ValidationError
+import json # Import json for pretty printing
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
@@ -223,7 +226,7 @@ def convert_docling_item_to_annotation(
         "annotationLabel": item_label_str,
         "rawText": item_text,
         "page": page_no,
-        "annotationJson": internal_annotation_details,
+        "annotation_json": internal_annotation_details,
         "parent_id": None,  # Will be assigned later during chunk processing
         "annotation_type": "TOKEN_LABEL",
         "structural": True, # Assuming these are structural elements from Docling
@@ -914,19 +917,47 @@ def process_document_with_converter(
             # Continue with non-enriched data if LLM step fails
 
     # --- 8. Construct Final Export Data ---
-    export_data: OpenContractDocExport = {
+    export_data_dict: dict = {
         "title": extracted_title,
         "content": content,
         "description": extracted_description,
         "pageCount": len(pawls_pages),
         "pawlsFileContent": pawls_pages,
-        "docLabels": [], # Placeholder - Add logic if document-level labels are needed
+        "docLabels": [],
         "labelledText": final_annotations,
         "relationships": relationships,
     }
 
-    logger.info(f"Successfully processed {pdf_filename}. Returning OpenContractDocExport.")
-    return OpenContractDocExport(**export_data)
+    try:
+        # Validate the dictionary against the main export model
+        validated_export_data = OpenContractDocExport(**export_data_dict)
+        logger.info(f"Successfully processed and validated {pdf_filename}. Returning OpenContractDocExport.")
+        return validated_export_data
+    except ValidationError as e:
+        # Log the detailed Pydantic validation errors
+        logger.error(f"Pydantic validation failed for {pdf_filename} during final export model creation:")
+        # Pretty print the JSON representation of the errors for clarity
+        try:
+            error_details = json.dumps(e.errors(), indent=2)
+            logger.error(f"Validation Errors:\n{error_details}")
+        except Exception as json_err:
+            logger.error(f"Could not serialize validation errors to JSON: {json_err}")
+            logger.error(f"Raw validation errors: {e.errors()}")
+
+        # Optionally log parts of the input data that might be causing issues
+        # Be cautious with logging large amounts of data
+        # Example: Log the first problematic annotation if the error path indicates it
+        try:
+            error_location = e.errors()[0].get('loc', [])
+            if len(error_location) > 1 and error_location[0] == 'labelledText' and isinstance(error_location[1], int):
+                problematic_index = error_location[1]
+                if problematic_index < len(final_annotations):
+                    logger.error(f"Problematic annotation data (index {problematic_index}):\n{json.dumps(final_annotations[problematic_index], indent=2)}")
+        except Exception as log_err:
+            logger.error(f"Error trying to log problematic data snippet: {log_err}")
+
+
+        return None # Return None or re-raise depending on desired failure behavior
 
 # --- Wrapper Function for Dynamic Initialization ---
 def process_document_dynamic_init(
