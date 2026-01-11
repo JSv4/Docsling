@@ -16,9 +16,10 @@ from docling_core.types.doc.document import ListItem
 from docling_core.types.doc import (
     DocItemLabel,
     DoclingDocument,
+    PictureItem,
     SectionHeaderItem,
     TextItem,
-    PageItem as DoclingPage, # Explicitly import Docling's Page
+    PageItem as DoclingPage,  # Explicitly import Docling's Page
 )
 from docling_core.transforms.chunker.hierarchical_chunker import HierarchicalChunker
 from shapely.geometry import box
@@ -232,6 +233,126 @@ def convert_docling_item_to_annotation(
         "structural": True, # Assuming these are structural elements from Docling
     }
 
+    return annotation
+
+
+def convert_picture_to_annotation(
+    item: PictureItem,
+    page_dimensions: Dict[int, Tuple[float, float]],
+) -> Optional[OpenContractsAnnotationPythonType]:
+    """
+    Converts a Docling PictureItem into an OpenContracts annotation format.
+
+    Unlike text items, pictures don't have underlying text tokens - they are
+    identified by their bounding box and label (PICTURE or CHART).
+
+    Args:
+        item: The Docling PictureItem to convert.
+        page_dimensions: A dictionary mapping 0-based page indices to (width, height) tuples.
+
+    Returns:
+        An OpenContractsAnnotationPythonType object or None if conversion is not possible
+        (e.g., missing provenance, bounding box, or page data).
+    """
+    if not (hasattr(item, "prov") and item.prov):
+        logger.warning(
+            f"PictureItem {getattr(item, 'self_ref', 'UNKNOWN')} lacks provenance, skipping annotation."
+        )
+        return None
+
+    # Ensure prov is not empty and first element has bbox
+    if not item.prov or not item.prov[0].bbox:
+        logger.warning(
+            f"PictureItem {getattr(item, 'self_ref', 'UNKNOWN')} provenance lacks bbox, skipping annotation."
+        )
+        return None
+
+    first_prov = item.prov[0]
+    bbox = first_prov.bbox
+    # Docling uses 1-based page numbers, convert to 0-based for OpenContracts
+    page_no = first_prov.page_no - 1
+    item_ref = getattr(item, "self_ref", None)
+    if item_ref is None:
+        logger.warning("PictureItem lacks self_ref, skipping annotation.")
+        return None
+
+    # --- Get the label safely ---
+    item_label_raw = getattr(item, "label", None)
+    item_label_str: str
+    if isinstance(item_label_raw, DocItemLabel):
+        item_label_str = (
+            str(item_label_raw.value)
+            if hasattr(item_label_raw, "value")
+            else str(item_label_raw)
+        )
+    elif isinstance(item_label_raw, str):
+        item_label_str = item_label_raw
+    else:
+        item_label_str = "picture"  # Default for pictures
+        if item_label_raw is not None:
+            logger.warning(
+                f"PictureItem {item_ref} has unexpected label type: {type(item_label_raw)}. Using 'picture'."
+            )
+
+    # Get page height for coordinate transformation
+    page_dims = page_dimensions.get(page_no)
+    if page_dims is None:
+        logger.warning(
+            f"No page dimensions found for page {page_no} (0-based) for PictureItem {item_ref}, skipping annotation."
+        )
+        return None
+    _, page_height = page_dims
+
+    # Transform Y coordinates (Docling uses bottom-left origin, we need top-left)
+    try:
+        screen_bottom = float(page_height) - float(bbox.b)
+        screen_top = float(page_height) - float(bbox.t)
+        left = float(bbox.l)
+        right = float(bbox.r)
+    except (TypeError, ValueError) as e:
+        logger.warning(
+            f"Invalid bbox coordinates for PictureItem {item_ref} on page {page_no}: {bbox}. Error: {e}. Skipping annotation."
+        )
+        return None
+
+    # Get caption text if available
+    caption_text = ""
+    if hasattr(item, "caption_text") and callable(item.caption_text):
+        try:
+            caption_text = item.caption_text() or ""
+        except Exception:
+            pass
+
+    # Create the annotation_json structure
+    # Pictures don't have text tokens, so tokensJsons is empty
+    internal_annotation_details: dict[int, OpenContractsSinglePageAnnotationType] = {
+        page_no: {
+            "bounds": {
+                "left": left,
+                "top": screen_top,
+                "right": right,
+                "bottom": screen_bottom,
+            },
+            "tokensJsons": [],  # No text tokens for pictures
+            "rawText": caption_text,
+        }
+    }
+
+    # Create the full annotation structure
+    annotation: OpenContractsAnnotationPythonType = {
+        "id": item_ref,
+        "annotationLabel": item_label_str,
+        "rawText": caption_text,
+        "page": page_no,
+        "annotation_json": internal_annotation_details,
+        "parent_id": None,  # Will be assigned later during chunk processing if needed
+        "annotation_type": "TOKEN_LABEL",
+        "structural": True,  # Pictures are structural elements from Docling
+    }
+
+    logger.debug(
+        f"Created annotation for PictureItem {item_ref} on page {page_no} with label '{item_label_str}'"
+    )
     return annotation
 
 
@@ -745,13 +866,36 @@ def process_document_with_converter(
             # else: Annotation failed, warning already logged in convert_ function
 
         logger.info(f"Generated {valid_annotations_count} base annotations from {len(doc.texts)} text items.")
+
+        # --- 5b. Process Pictures ---
+        # Pictures are stored separately in doc.pictures and need to be converted to annotations
+        picture_annotations_count = 0
+        if hasattr(doc, "pictures") and doc.pictures:
+            for picture_item in doc.pictures:
+                annotation = convert_picture_to_annotation(
+                    picture_item,
+                    page_dimensions,
+                )
+                if annotation and annotation.get("id"):
+                    base_annotation_lookup[annotation["id"]] = annotation
+                    picture_annotations_count += 1
+                # else: Annotation failed, warning already logged in convert_ function
+
+            logger.info(
+                f"Generated {picture_annotations_count} picture annotations from {len(doc.pictures)} picture items."
+            )
+        else:
+            logger.debug("No pictures found in document.")
+
         if not base_annotation_lookup:
-             logger.warning(f"No base annotations could be generated for {pdf_filename}. Proceeding without annotations/relationships.")
-             # Decide if this should be an error or continue with empty lists
+            logger.warning(
+                f"No base annotations could be generated for {pdf_filename}. Proceeding without annotations/relationships."
+            )
+            # Decide if this should be an error or continue with empty lists
 
     except Exception as e:
         logger.error(f"Exception during base annotation generation for {pdf_filename}: {e}", exc_info=True)
-        return None # Treat failure here as critical
+        return None  # Treat failure here as critical
 
     # --- 6. Chunk Document and Build Hierarchy/Relationships ---
     final_annotations: list[OpenContractsAnnotationPythonType] = []
