@@ -44,6 +44,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     tesseract-ocr \
     poppler-utils \
+    build-essential \
+    gcc \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
     # Add any other common system dependencies here
     && rm -rf /var/lib/apt/lists/* \
     # Ensure pip is upgraded for the default python3
