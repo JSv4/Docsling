@@ -1,24 +1,12 @@
 import sys
 import os
 import pytest
-from unittest.mock import MagicMock, patch
 
 # Add the project root directory to the Python path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-# Create a mock for the beam module before it's imported
-beam_mock = MagicMock()
-beam_mock.endpoint = lambda **kwargs: lambda func: func  # Make endpoint decorator a no-op
-beam_mock.Image.return_value = MagicMock()
-beam_mock.Image.return_value.add_commands.return_value = MagicMock()
-beam_mock.Context = MagicMock
-
-# Apply the mock to sys.modules so it's used when beam is imported
-sys.modules['beam'] = beam_mock
-
-# Now the rest of the imports can proceed
 import pytest_asyncio
 from httpx import AsyncClient
 from typing import AsyncGenerator, Generator

@@ -1,6 +1,6 @@
 # Docling Parser Microservice
 
-This project provides a microservice for parsing PDF documents using the Docling library to extract structured text, annotations, and relationships. It offers two deployment options: a persistent FastAPI web service and a serverless Beam endpoint.
+This project provides a microservice for parsing PDF documents using the Docling library to extract structured text, annotations, and relationships.
 
 ## Features
 
@@ -9,7 +9,6 @@ This project provides a microservice for parsing PDF documents using the Docling
 *   Applies Hierarchical Chunking to group related text items.
 *   Generates structured output in OpenContracts format (PAWLS tokens, annotations, relationships).
 *   Offers options to force OCR and control relationship grouping.
-*   Includes both a FastAPI web server implementation and a Beam serverless endpoint.
 *   Containerized using Docker with multi-stage builds for development and production.
 *   Includes unit and integration tests using `pytest`.
 
@@ -17,8 +16,7 @@ This project provides a microservice for parsing PDF documents using the Docling
 
 *   **Python 3.10+**
 *   **Docling & Docling Core:** PDF parsing and structuring engine.
-*   **FastAPI:** High-performance web framework (for the web service option).
-*   **Beam:** Serverless platform (for the serverless endpoint option).
+*   **FastAPI:** High-performance web framework.
 *   **Pydantic:** Data validation and settings management.
 *   **Uvicorn:** ASGI server (for running FastAPI).
 *   **Docker & Docker Compose:** Containerization and local orchestration.
@@ -41,13 +39,11 @@ This project provides a microservice for parsing PDF documents using the Docling
 ├── tests/                  # Pytest tests
 │   ├── fixtures/           # Test data files (PDF, JSON, TXT)
 │   ├── __init__.py
-│   ├── conftest.py         # Pytest configuration/fixtures (if any)
-│   ├── test_main.py        # Tests for the FastAPI app (app/main.py)
-│   └── test_beam_app.py    # Tests for the Beam endpoint function (beam_app.py)
+│   ├── conftest.py         # Pytest configuration/fixtures
+│   └── test_main.py        # Tests for the FastAPI app
 ├── .env.example            # Example environment variables file
 ├── .gitignore
 ├── .dockerignore
-├── beam_app.py             # Beam endpoint definition script
 ├── Dockerfile              # Multi-stage Dockerfile for building images
 ├── docker-compose.yml      # Docker Compose file for local development/testing
 ├── README.md               # This file
@@ -61,7 +57,6 @@ This project provides a microservice for parsing PDF documents using the Docling
 
 *   **Python 3.10+** and `pip`.
 *   **Docker** and **Docker Compose** (for containerized development/deployment).
-*   **Beam CLI** (if deploying to Beam).
 *   **Git**.
 
 ### Steps
@@ -93,15 +88,13 @@ This project provides a microservice for parsing PDF documents using the Docling
       ```bash
       python scripts/download_models.py --path ./docling_models
       ```
-    *   This step is **not** required if you only intend to run the service using Docker/Docker Compose or deploy via Beam, as the models will be downloaded during the image build process.
+    *   This step is **not** required if you only intend to run the service using Docker/Docker Compose, as the models will be downloaded during the image build process.
 
 5.  **Configure Environment (Optional):**
     *   Copy `.env.example` to `.env`.
-    *   Modify `.env` if you need to change the `DOCLING_MODELS_PATH` for local non-Docker development (the default `./docling_models` should work if you ran the download script as above). The path inside Docker/Beam containers is handled separately by the `Dockerfile`'s `ENV` instruction.
+    *   Modify `.env` if you need to change the `DOCLING_MODELS_PATH` for local non-Docker development (the default `./docling_models` should work if you ran the download script as above). The path inside Docker containers is handled separately by the `Dockerfile`'s `ENV` instruction.
 
 ## Running the Service
-
-There are several ways to run the service:
 
 ### A) Local Development using Docker Compose (Recommended)
 
@@ -156,17 +149,6 @@ For production deployment, you build the lean `production` stage of the `Dockerf
     *   `docling-parser-prod:latest`: Specifies the image to run.
     *   You might need to add `--env-file .env.prod` or `-e VAR=value` flags to pass production-specific environment variables.
 
-### D) Deploying via Beam
-
-The `beam_app.py` script defines a Beam endpoint. Deployment via Beam uses its own image building process defined within `beam_app.py` (using `beam.Image`). The multi-stage Dockerfile is *not* directly used by `beam deploy`.
-
-1.  **Prerequisites:** Ensure Beam CLI is installed and configured.
-2.  **Deploy:** Navigate to the project root directory and run:
-    ```bash
-    beam deploy beam_app.py
-    ```
-    Beam packages the necessary code (including `scripts/`), installs dependencies specified in `beam.Image`, runs the commands (including the model download script), and deploys the serverless endpoint.
-
 ## Usage
 
 ### FastAPI Endpoint (`/parse/`)
@@ -193,36 +175,6 @@ The `beam_app.py` script defines a Beam endpoint. Deployment via Beam uses its o
     ```
 *   **Error Response (400 Bad Request, 422 Unprocessable Entity, 500 Internal Server Error):** Standard FastAPI error JSON.
 
-### Beam Endpoint
-
-*   **Invocation:** Use Beam SDK, `curl`, or other HTTP clients to send a POST request to the deployed endpoint URL provided by Beam.
-*   **Request Body (JSON):**
-    ```json
-    {
-      "filename": "your_document.pdf",
-      "pdf_base64": "JVBERi0xLjcKJeLjz9MKMiAwIG...", // Base64 encoded string of the PDF content
-      "roll_up_groups": true, // Optional, defaults to false
-      "force_ocr": false,     // Optional, defaults to false
-      "llm_enhanced_hierarchy": false // Optional, defaults to false
-    }
-    ```
-*   **Success Response:** JSON object containing a `result` key with the `OpenContractDocExport` structure.
-    ```json
-    {
-      "result": {
-        "title": "...",
-        "content": "...",
-        // ... other fields ...
-      }
-    }
-    ```
-*   **Error Response:** JSON object containing an `error` key with a description of the issue.
-    ```json
-    {
-      "error": "Missing or invalid 'pdf_base64' input (must be a base64 string)."
-    }
-    ```
-
 ## Dockerfile Structure (Multi-Stage)
 
 The `Dockerfile` uses a multi-stage build approach to create optimized images for different environments:
@@ -240,11 +192,11 @@ The `Dockerfile` uses a multi-stage build approach to create optimized images fo
 
 ### Handling Docling Models
 
-The Docling and EasyOCR models required by this service are large and are **not** committed to the Git repository. Instead, they are downloaded using helper functions from the `docling-core` and `easyocr` libraries during the Docker/Beam image build process. This is managed by the `scripts/download_models.py` script.
+The Docling and EasyOCR models required by this service are large and are **not** committed to the Git repository. Instead, they are downloaded using helper functions from the `docling-core` and `easyocr` libraries during the Docker image build process. This is managed by the `scripts/download_models.py` script.
 
 1.  **Download Script:** The `scripts/download_models.py` script uses `docling.pipeline.standard_pdf_pipeline.StandardPdfPipeline.download_models_hf` and `easyocr.Reader` to fetch the necessary models. Ensure the `required_languages` list within the script matches your needs for EasyOCR (default is `['en']`).
-2.  **Build Process:** When `docker build`, `docker-compose build`, or `beam deploy` is run, the build process will:
+2.  **Build Process:** When `docker build` or `docker-compose build` is run, the build process will:
     *   Execute the `scripts/download_models.py` script within the build environment.
-    *   The script downloads and saves the models directly into the `/app/docling_models` directory (or the path specified by the `DOCLING_MODELS_PATH` environment variable set within the `Dockerfile` or `beam_app.py`) inside the container image.
+    *   The script downloads and saves the models directly into the `/app/docling_models` directory (or the path specified by the `DOCLING_MODELS_PATH` environment variable set within the `Dockerfile`) inside the container image.
 3.  **Local Development (Non-Docker):** For local development *without* Docker (e.g., running `uvicorn app.main:app` directly), you must manually download the models first by running the script: `python scripts/download_models.py --path ./docling_models`. The `.gitignore` file prevents this local `docling_models/` directory from being committed.
-4.  **Updating Models:** The `docling-core` and `easyocr` libraries manage the model sources. To get updated models, simply rebuild the Docker image (`docker-compose build` or `docker build --target production ...`) or redeploy the Beam app (`beam deploy beam_app.py`). This re-runs the download script. If you suspect caching issues or want to ensure the latest versions are fetched, you can add the `--force` flag when the script is called within the `Dockerfile` or `beam_app.py`'s `commands` list (e.g., `python /app/scripts/download_models.py --path "${DOCLING_MODELS_PATH}" --force`).
+4.  **Updating Models:** The `docling-core` and `easyocr` libraries manage the model sources. To get updated models, simply rebuild the Docker image (`docker-compose build` or `docker build --target production ...`). This re-runs the download script. If you suspect caching issues or want to ensure the latest versions are fetched, you can add the `--force` flag when the script is called within the `Dockerfile`.
