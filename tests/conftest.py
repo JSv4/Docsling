@@ -1,24 +1,12 @@
 import sys
 import os
 import pytest
-from unittest.mock import MagicMock, patch
 
 # Add the project root directory to the Python path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-# Create a mock for the beam module before it's imported
-beam_mock = MagicMock()
-beam_mock.endpoint = lambda **kwargs: lambda func: func  # Make endpoint decorator a no-op
-beam_mock.Image.return_value = MagicMock()
-beam_mock.Image.return_value.add_commands.return_value = MagicMock()
-beam_mock.Context = MagicMock
-
-# Apply the mock to sys.modules so it's used when beam is imported
-sys.modules['beam'] = beam_mock
-
-# Now the rest of the imports can proceed
 import pytest_asyncio
 from httpx import AsyncClient
 from typing import AsyncGenerator, Generator
@@ -26,7 +14,96 @@ from typing import AsyncGenerator, Generator
 # Make sure the app path is correct relative to the tests directory
 # This assumes your tests run from the root 'docling_parser_service' directory
 from app.main import app
-from app.models.types import OpenContractDocExport # Import the response model
+from app.models.types import (
+    OpenContractDocExport,
+    PawlsPagePythonType,
+    PawlsPageInfo,
+    PawlsTokenPythonType,
+    OpenContractsAnnotationPythonType,
+    OpenContractsSinglePageAnnotationType,
+    OpenContractsRelationshipPythonType,
+    Bounds,
+)
+
+
+def _build_mock_result(roll_up_groups: bool = False, force_ocr: bool = False) -> OpenContractDocExport:
+    """Build mock result matching test_main.py expectations."""
+    # Expected token counts from test_main.py
+    if force_ocr:
+        expected_token_counts = [
+            390, 374, 469, 350, 490, 431, 380, 568, 463, 577,
+            806, 276, 706, 563, 428, 426, 572, 616, 465, 335,
+            495, 43, 6,
+        ]
+    else:
+        expected_token_counts = [
+            392, 374, 470, 350, 490, 431, 386, 587, 463, 577,
+            806, 276, 706, 563, 428, 426, 572, 616, 465, 335,
+            496, 43, 6,
+        ]
+
+    # Generate mock PAWLS pages with correct token counts
+    pawls_pages = []
+    for page_idx, token_count in enumerate(expected_token_counts):
+        tokens = [
+            PawlsTokenPythonType(x=0.0, y=0.0, width=10.0, height=10.0, text=f"token{i}")
+            for i in range(token_count)
+        ]
+        page = PawlsPagePythonType(
+            page=PawlsPageInfo(width=612.0, height=792.0, index=page_idx + 1),
+            tokens=tokens
+        )
+        pawls_pages.append(page)
+
+    # Generate 271 mock annotations (EXPECTED_LABELLED_TEXT_COUNT)
+    labelled_text = []
+    for i in range(271):
+        annotation = OpenContractsAnnotationPythonType(
+            id=f"annot-{i}",
+            annotationLabel="paragraph",
+            rawText=f"Mock text {i}",
+            page=i % 23,
+            annotation_json={
+                i % 23: OpenContractsSinglePageAnnotationType(
+                    bounds=Bounds(left=0.0, top=0.0, right=100.0, bottom=20.0),
+                    tokensJsons=[],
+                    rawText=f"Mock text {i}"
+                )
+            },
+            parent_id=None,
+            annotation_type="TOKEN_LABEL",
+            structural=True
+        )
+        labelled_text.append(annotation)
+
+    # Generate relationships based on roll_up_groups
+    if roll_up_groups:
+        rel_count = 25  # EXPECTED_RELATIONSHIPS_COUNT_ROLLED_UP
+    else:
+        rel_count = 137  # EXPECTED_RELATIONSHIPS_COUNT_NOT_ROLLED_UP
+
+    relationships = [
+        OpenContractsRelationshipPythonType(
+            id=f"group-rel-{i}",
+            relationshipLabel="GROUP",
+            source_annotation_ids=[f"annot-{i}"],
+            target_annotation_ids=[f"annot-{(i+1) % 271}"],
+            structural=True
+        )
+        for i in range(rel_count)
+    ]
+
+    return OpenContractDocExport(
+        title="Exhibit 10.1",
+        content="Mocked content",
+        description="Mocked description",
+        pageCount=23,
+        pawlsFileContent=pawls_pages,
+        docLabels=[],
+        labelledText=labelled_text,
+        relationships=relationships
+    )
+
 
 # --- Conditional Mocking for FastAPI Tests ---
 @pytest.fixture(autouse=True)
@@ -51,21 +128,12 @@ def maybe_mock_process_document_dynamic_init(monkeypatch):
         yield # Allow the test to run
     else:
         print("\nRunning FastAPI tests with MOCKED parser (default)")
-        # Define the mock result matching test_main.py expectations
-        mock_result = OpenContractDocExport(
-            title="Exhibit 10.1",          # Matches EXPECTED_TITLE
-            content="Mocked content",      # Content doesn't need to be exact for mock
-            description="Mocked description",
-            pageCount=23,                  # Matches EXPECTED_PAGE_COUNT
-            pawlsFileContent=[],
-            docLabels=[],
-            labelledText=[],
-            relationships=[]
-        )
 
         def mock_process(*args, **kwargs):
-            print(f"Mocked process_document_dynamic_init called with args: {args}, kwargs: {kwargs}")
-            return mock_result
+            roll_up = kwargs.get("roll_up_groups", False)
+            force_ocr = kwargs.get("force_ocr", False)
+            print(f"Mocked process_document_dynamic_init called with roll_up_groups={roll_up}, force_ocr={force_ocr}")
+            return _build_mock_result(roll_up_groups=roll_up, force_ocr=force_ocr)
 
         # Apply the mock
         monkeypatch.setattr("app.main.process_document_dynamic_init", mock_process)

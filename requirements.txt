@@ -13,4 +13,3 @@ pytesseract==0.3.13
 pdfplumber==0.11.9
 shapely==2.1.2
 pydantic-settings==2.12.0
-beam-client==0.2.150
